@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.0] - 2026-10-21
+
+### Added
+
+- "Open apps in freeform windows" toggle in the Behavior tab — launches apps from the sidebar as floating windows via Shizuku, with an overlay title bar (drag to move, maximize, close) and a resize handle. Requires Shizuku running with permission granted; falls back to a normal fullscreen launch otherwise. Contributed by @dayeggpi (#11)
+
 ## [2.0.4] - 2026-06-16
 
 ### Changed
