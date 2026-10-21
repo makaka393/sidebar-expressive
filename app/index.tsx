@@ -66,6 +66,7 @@ const DEFAULT_OVERLAY: OverlaySettings = {
   showKeyboardOnAllApps: false,
   showVolume: true,
   controlTilesOrder: ['torch','rotate','brightness','ringer','share','power','qr','dnd'],
+  freeformWindows: false,
 };
 
 const CONTROL_TILES = [
@@ -595,6 +596,24 @@ export default function Index() {
                 <Switch
                   value={overlay.showKeyboardOnAllApps}
                   onValueChange={v => setOverlay(p => ({ ...p, showKeyboardOnAllApps: v }))}
+                  trackColor={{ true: colors.tint }}
+                />
+              </View>
+              <View style={s.separator} />
+              <View style={s.row}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.rowLabel}>Open apps in freeform windows</Text>
+                  <Text style={s.rowSub}>Launch apps as floating windows via Shizuku</Text>
+                </View>
+                <Switch
+                  value={overlay.freeformWindows}
+                  onValueChange={async v => {
+                    if (v) {
+                      const status = await Sidebar.hasShizukuPermission();
+                      if (status !== 'granted') await Sidebar.requestShizukuPermission();
+                    }
+                    setOverlay(p => ({ ...p, freeformWindows: v }));
+                  }}
                   trackColor={{ true: colors.tint }}
                 />
               </View>

@@ -1,6 +1,7 @@
 package com.alkisstam.sidebar
 
 import android.app.AppOpsManager
+import rikka.shizuku.Shizuku
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
@@ -200,6 +201,7 @@ class SidebarModule(private val reactContext: ReactApplicationContext) :
         map.putBoolean("showVolume", prefs.getBoolean(Prefs.SHOW_VOLUME, true))
         map.putString("controlTilesOrder", prefs.getString(Prefs.CONTROL_TILES_ORDER,
             "[\"torch\",\"rotate\",\"brightness\",\"ringer\",\"share\",\"power\",\"qr\",\"dnd\"]"))
+        map.putBoolean("freeformWindows", prefs.getBoolean(Prefs.FREEFORM_WINDOWS, false))
         promise.resolve(map)
     }
 
@@ -231,6 +233,7 @@ class SidebarModule(private val reactContext: ReactApplicationContext) :
         if (settings.hasKey("showDnd")) prefs.putBoolean(Prefs.SHOW_DND, settings.getBoolean("showDnd"))
         if (settings.hasKey("showVolume")) prefs.putBoolean(Prefs.SHOW_VOLUME, settings.getBoolean("showVolume"))
         if (settings.hasKey("controlTilesOrder")) prefs.putString(Prefs.CONTROL_TILES_ORDER, settings.getString("controlTilesOrder"))
+        if (settings.hasKey("freeformWindows")) prefs.putBoolean(Prefs.FREEFORM_WINDOWS, settings.getBoolean("freeformWindows"))
         prefs.apply()
         val serviceEnabled = reactContext.getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE)
             .getBoolean(Prefs.SERVICE_ENABLED, false)
@@ -290,6 +293,31 @@ class SidebarModule(private val reactContext: ReactApplicationContext) :
             appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), reactContext.packageName)
         }
         promise.resolve(mode == AppOpsManager.MODE_ALLOWED)
+    }
+
+    @ReactMethod
+    fun hasShizukuPermission(promise: Promise) {
+        try {
+            val running = Shizuku.pingBinder()
+            val granted = running && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            promise.resolve(if (!running) "not_running" else if (granted) "granted" else "denied")
+        } catch (e: Exception) {
+            promise.resolve("not_running")
+        }
+    }
+
+    @ReactMethod
+    fun requestShizukuPermission(promise: Promise) {
+        try {
+            if (!Shizuku.pingBinder()) { promise.resolve("not_running"); return }
+            if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+                promise.resolve("granted"); return
+            }
+            Shizuku.requestPermission(1002)
+            promise.resolve("requested")
+        } catch (e: Exception) {
+            promise.resolve("error")
+        }
     }
 
     @ReactMethod

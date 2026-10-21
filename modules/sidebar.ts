@@ -52,6 +52,7 @@ export interface OverlaySettings {
   showDnd: boolean;
   showVolume: boolean;
   controlTilesOrder: string[];
+  freeformWindows: boolean;
 }
 
 export default {
@@ -120,5 +121,11 @@ export default {
   },
   requestUsageAccessPermission(): Promise<void> {
     return SidebarModule.requestUsageAccessPermission();
+  },
+  hasShizukuPermission(): Promise<'granted' | 'denied' | 'not_running'> {
+    return SidebarModule.hasShizukuPermission();
+  },
+  requestShizukuPermission(): Promise<'granted' | 'requested' | 'not_running' | 'error'> {
+    return SidebarModule.requestShizukuPermission();
   },
 };

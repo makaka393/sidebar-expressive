@@ -11,6 +11,7 @@
   <uses-permission android:name="android.permission.WRITE_SETTINGS"/>
   <uses-permission android:name="android.permission.EXPAND_STATUS_BAR"/>
   <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"/>
+  <uses-permission android:name="moe.shizuku.manager.permission.API_V23"/>
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW"/>
@@ -36,6 +37,13 @@
         <data android:scheme="sidebar"/>
       </intent-filter>
     </activity>
+    <provider
+      android:name="rikka.shizuku.ShizukuProvider"
+      android:authorities="${applicationId}.shizuku"
+      android:multiprocess="false"
+      android:enabled="true"
+      android:exported="true"
+      android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"/>
     <service
       android:name=".SidebarOverlayService"
       android:foregroundServiceType="specialUse"
