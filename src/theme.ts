@@ -1,220 +1,123 @@
-import { StyleSheet } from "react-native";
+import {
+  DynamicScheme,
+  Hct,
+  SchemeExpressive,
+  SchemeFidelity,
+  SchemeTonalSpot,
+  SchemeVibrant,
+  argbFromHex,
+  hexFromArgb,
+} from "@material/material-color-utilities";
+import { Platform, TextStyle } from "react-native";
 
-export function makeColors(scheme: 'light' | 'dark') {
-  const dark = scheme === "dark";
-  return {
-    bg: dark ? "#141218" : "#FFFBFE",
-    surfaceContainer: dark ? "#211F26" : "#F3EFF7",
-    surfaceContainerHigh: dark ? "#2B2930" : "#EDE8F2",
-    card: dark ? "#211F26" : "#F3EFF7",
-    primary: dark ? "#D0BCFF" : "#6750A4",
-    onPrimary: dark ? "#381E72" : "#FFFFFF",
-    primaryContainer: dark ? "#4F378B" : "#EADDFF",
-    onPrimaryContainer: dark ? "#EADDFF" : "#21005D",
-    secondaryContainer: dark ? "#4A4458" : "#E8DEF8",
-    onSecondaryContainer: dark ? "#E8DEF8" : "#1D192B",
-    text: dark ? "#E6E1E5" : "#1C1B1F",
-    subtext: dark ? "#CAC4D0" : "#49454F",
-    outline: dark ? "#938F99" : "#79747E",
-    separator: dark ? "#49454F" : "#CAC4D0",
-    tint: dark ? "#D0BCFF" : "#6750A4",
-    errorContainer: dark ? "#8C1D18" : "#F9DEDC",
-    onErrorContainer: dark ? "#F2B8B5" : "#410E0B",
-  };
+/** Every M3 color role exchanged with native. Keep in sync with `SidebarColors.ROLE_NAMES`. */
+export const ROLE_NAMES = [
+  "primary", "onPrimary", "primaryContainer", "onPrimaryContainer",
+  "secondary", "onSecondary", "secondaryContainer", "onSecondaryContainer",
+  "tertiary", "onTertiary", "tertiaryContainer", "onTertiaryContainer",
+  "error", "onError", "errorContainer", "onErrorContainer",
+  "surface", "surfaceDim", "surfaceBright",
+  "surfaceContainerLowest", "surfaceContainerLow", "surfaceContainer",
+  "surfaceContainerHigh", "surfaceContainerHighest",
+  "onSurface", "onSurfaceVariant", "outline", "outlineVariant",
+  "inverseSurface", "inverseOnSurface", "inversePrimary",
+] as const;
+
+export type Role = (typeof ROLE_NAMES)[number];
+export type ColorScheme = Record<Role, string>;
+export type SchemePair = { light: ColorScheme; dark: ColorScheme };
+
+export type PaletteStyle = "tonal" | "vibrant" | "expressive" | "fidelity";
+export type ColorSource = "system" | "custom";
+
+export const DEFAULT_SEED = "#6750A4";
+
+export const SEED_PRESETS = [
+  "#6750A4", "#0B57D0", "#00677F", "#386A20",
+  "#7C5800", "#A63B00", "#B3261E", "#984061",
+];
+
+export const PALETTE_STYLES: { id: PaletteStyle; label: string }[] = [
+  { id: "tonal", label: "Tonal" },
+  { id: "vibrant", label: "Vibrant" },
+  { id: "expressive", label: "Expressive" },
+  { id: "fidelity", label: "Fidelity" },
+];
+
+function buildScheme(seed: string, style: PaletteStyle, dark: boolean): DynamicScheme {
+  const hct = Hct.fromInt(argbFromHex(seed));
+  switch (style) {
+    case "vibrant": return new SchemeVibrant(hct, dark, 0);
+    case "expressive": return new SchemeExpressive(hct, dark, 0);
+    case "fidelity": return new SchemeFidelity(hct, dark, 0);
+    default: return new SchemeTonalSpot(hct, dark, 0);
+  }
 }
 
-export type AppColors = ReturnType<typeof makeColors>;
-
-export function makeStyles(colors: AppColors) {
-  return StyleSheet.create({
-    root: { flex: 1, backgroundColor: colors.bg },
-
-    serviceCard: {
-      flexDirection: "row",
-      alignItems: "center",
-      backgroundColor: colors.surfaceContainerHigh,
-      borderRadius: 20,
-      paddingHorizontal: 20,
-      paddingVertical: 18,
-      margin: 16,
-      marginBottom: 8,
-    },
-
-    scroll: { flex: 1 },
-    scrollContent: { padding: 16, paddingBottom: 32 },
-
-    section: { backgroundColor: colors.surfaceContainer, borderRadius: 16, overflow: "hidden" },
-    sectionTitle: {
-      fontSize: 13, fontWeight: "600", color: colors.primary,
-      marginHorizontal: 20, marginTop: 16, marginBottom: 4, letterSpacing: 0.3,
-    },
-    separator: { height: StyleSheet.hairlineWidth, backgroundColor: colors.separator, marginLeft: 72 },
-
-    controlStrip: { paddingHorizontal: 12, paddingVertical: 12, gap: 16 },
-    controlCell: { alignItems: "center", width: 64 },
-    controlCellActive: { opacity: 0.8 },
-    controlIconCircle: {
-      width: 52, height: 52, borderRadius: 26,
-      backgroundColor: colors.primaryContainer,
-      alignItems: "center", justifyContent: "center",
-      position: "relative",
-    },
-    controlIconCircleOff: { backgroundColor: colors.surfaceContainerHigh },
-    controlCellLabel: {
-      fontSize: 11, color: colors.text, textAlign: "center",
-      marginTop: 6, lineHeight: 14,
-    },
-    controlGrid: {
-      flexDirection: "row", flexWrap: "wrap",
-      paddingHorizontal: 12, paddingVertical: 12, paddingTop: 4,
-    },
-    controlGridCell: { width: "25%", alignItems: "center", paddingVertical: 10 },
-
-    row: {
-      flexDirection: "row", alignItems: "center",
-      paddingHorizontal: 20, paddingVertical: 16,
-    },
-    rowLabel: { fontSize: 16, color: colors.text },
-    rowSub: { fontSize: 13, color: colors.subtext, marginTop: 2 },
-
-    settingRow: {
-      flexDirection: "row", alignItems: "center",
-      paddingHorizontal: 20, paddingVertical: 14, gap: 16,
-    },
-    settingLabel: { fontSize: 16, color: colors.text, width: 80 },
-
-    // M3 Segmented Button
-    segmented: {
-      flex: 1,
-      flexDirection: "row",
-      borderRadius: 20,
-      borderWidth: 1,
-      borderColor: colors.outline,
-      overflow: "hidden",
-    },
-    segBtn: { paddingHorizontal: 20, paddingVertical: 9, flex: 1, alignItems: "center" },
-    segBtnSm: { paddingHorizontal: 6, paddingVertical: 7, flex: 1, alignItems: "center" },
-    segBtnActive: { backgroundColor: colors.secondaryContainer },
-    segBtnText: { fontSize: 14, color: colors.outline, letterSpacing: 0.1 },
-    segBtnSmText: { fontSize: 12, color: colors.outline },
-    segBtnTextActive: { color: colors.onSecondaryContainer, fontWeight: "500" },
-
-    sliderWrap: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6 },
-    sliderEdge: { fontSize: 12, color: colors.subtext },
-    sliderTrackWrap: { flex: 1, height: 44, justifyContent: "center" },
-    sliderTrackBg: {
-      position: "absolute", left: 0, right: 0,
-      height: 28, borderRadius: 14, backgroundColor: colors.separator,
-    },
-    sliderTrackFill: {
-      position: "absolute", left: 0,
-      height: 28, borderRadius: 14, backgroundColor: colors.primary,
-    },
-
-    permCount: {
-      fontSize: 13, color: colors.subtext, marginBottom: 12,
-      textAlign: "center", letterSpacing: 0.3,
-    },
-
-    // M3 Filled Button
-    saveBtn: {
-      margin: 16, backgroundColor: colors.primary,
-      borderRadius: 20, paddingVertical: 14, alignItems: "center",
-    },
-    openSettingsBtn: { marginTop: 8, flexDirection: "row", justifyContent: "center" },
-    saveBtnCompact: { margin: 10, paddingVertical: 12 },
-    saveBtnDisabled: { opacity: 0.38 },
-    saveBtnText: { color: colors.onPrimary, fontSize: 14, fontWeight: "500", letterSpacing: 0.1 },
-
-    // M3 Tonal Button
-    grantBtn: {
-      backgroundColor: colors.primaryContainer,
-      borderRadius: 20, paddingHorizontal: 16, paddingVertical: 9,
-    },
-    grantBtnText: { color: colors.onPrimaryContainer, fontSize: 14, fontWeight: "500" },
-
-    // M3 Error Banner
-    banner: {
-      backgroundColor: colors.errorContainer,
-      borderRadius: 16, padding: 16, gap: 8, margin: 16, marginBottom: 0,
-    },
-    bannerTitle: { fontSize: 14, fontWeight: "700", color: colors.onErrorContainer },
-    bannerBody: { fontSize: 13, color: colors.onErrorContainer, lineHeight: 20 },
-    bannerBtn: {
-      alignSelf: "flex-start", backgroundColor: colors.primary,
-      borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, marginTop: 4,
-    },
-    bannerBtnText: { color: colors.onPrimary, fontWeight: "500", fontSize: 14 },
-
-    appsPane: { flex: 1, flexDirection: "row" },
-    appsLeft: { flex: 6, paddingTop: 8 },
-    paneDiv: { width: StyleSheet.hairlineWidth, backgroundColor: colors.separator },
-    appsRight: { flex: 4, paddingTop: 8 },
-
-    // M3 Search Bar
-    search: {
-      marginHorizontal: 8, marginBottom: 8,
-      paddingHorizontal: 16, paddingVertical: 12,
-      backgroundColor: colors.surfaceContainerHigh, borderRadius: 28,
-      fontSize: 14, color: colors.text,
-    },
-
-    appGrid: { paddingHorizontal: 4, paddingBottom: 16 },
-    appCell: {
-      flex: 1, alignItems: "center",
-      paddingVertical: 10, paddingHorizontal: 2,
-    },
-    appIconWrap: { position: "relative", width: 52, height: 52 },
-    appIcon: { width: 52, height: 52, borderRadius: 12 },
-    checkBadge: {
-      position: "absolute", bottom: -2, right: -2,
-      width: 18, height: 18, borderRadius: 9,
-      backgroundColor: colors.primary, alignItems: "center", justifyContent: "center",
-    },
-    appCellName: {
-      fontSize: 10, color: colors.subtext, textAlign: "center",
-      marginTop: 4, lineHeight: 13,
-    },
-    appCellNameSelected: { color: colors.primary },
-
-    favHeader: {
-      fontSize: 11, fontWeight: "600", color: colors.subtext,
-      marginBottom: 6, marginHorizontal: 12, letterSpacing: 0.5,
-      textTransform: "uppercase",
-    },
-    favEmpty: {
-      fontSize: 13, color: colors.subtext,
-      marginHorizontal: 12, marginTop: 12, lineHeight: 18,
-    },
-    favRow: {
-      flexDirection: "row", alignItems: "center",
-      paddingHorizontal: 12, height: 64,
-      backgroundColor: colors.surfaceContainer, gap: 12,
-    },
-    favRowActive: { backgroundColor: colors.surfaceContainerHigh },
-    favIcon: { width: 40, height: 40, borderRadius: 10 },
-    iconPlaceholder: { backgroundColor: colors.separator },
-    favName: { flex: 1, fontSize: 13, color: colors.text },
-    dragHandle: { width: 28, height: 28, alignItems: "center", justifyContent: "center" },
-
-    // M3 Navigation Bar
-    tabBar: {
-      flexDirection: "row",
-      backgroundColor: colors.surfaceContainer,
-      paddingBottom: 14,
-      paddingTop: 8,
-    },
-    tabItem: { flex: 1, alignItems: "center" },
-    navIndicator: {
-      width: 72, height: 52, borderRadius: 26,
-      backgroundColor: 'transparent',
-      alignItems: "center", justifyContent: "center",
-      flexDirection: "column", gap: 2,
-    },
-    navIndicatorActive: { backgroundColor: colors.primaryContainer, borderRadius: 26 },
-    tabLabel: { fontSize: 11, color: colors.subtext, letterSpacing: 0.4 },
-    tabLabelActive: { color: colors.onPrimaryContainer, fontWeight: "500" },
-  });
+function toColorScheme(s: DynamicScheme): ColorScheme {
+  const out = {} as ColorScheme;
+  for (const role of ROLE_NAMES) out[role] = hexFromArgb(s[role]).toUpperCase();
+  return out;
 }
 
-export type AppStyles = ReturnType<typeof makeStyles>;
+const schemeCache = new Map<string, SchemePair>();
+
+/** Light + dark schemes generated from a seed color with Material Color Utilities. */
+export function schemeFromSeed(seed: string, style: PaletteStyle = "tonal"): SchemePair {
+  const valid = isHex(seed) ? seed.toUpperCase() : DEFAULT_SEED;
+  const key = `${valid}:${style}`;
+  let pair = schemeCache.get(key);
+  if (!pair) {
+    pair = {
+      light: toColorScheme(buildScheme(valid, style, false)),
+      dark: toColorScheme(buildScheme(valid, style, true)),
+    };
+    schemeCache.set(key, pair);
+  }
+  return pair;
+}
+
+export function isHex(v: string) {
+  return /^#[0-9A-Fa-f]{6}$/.test(v);
+}
+
+/** `#RRGGBB` + opacity → `rgba()` string, used for M3 state layers and scrims. */
+export function alpha(hex: string, a: number) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
+// ── Type scale (M3 Expressive leans on heavier, emphasized weights) ──────────
+
+const family = Platform.select({ android: "sans-serif", default: undefined });
+const familyMedium = Platform.select({ android: "sans-serif-medium", default: undefined });
+
+const t = (size: number, line: number, weight: TextStyle["fontWeight"], track = 0, fam = family): TextStyle =>
+  ({ fontSize: size, lineHeight: line, fontWeight: weight, letterSpacing: track, fontFamily: fam });
+
+export const type = {
+  displaySmall: t(36, 44, "700", -0.25),
+  headlineSmall: t(24, 32, "600"),
+  titleLarge: t(22, 28, "600"),
+  titleMedium: t(16, 24, "600", 0.15, familyMedium),
+  titleSmall: t(14, 20, "600", 0.1, familyMedium),
+  bodyLarge: t(16, 24, "400", 0.3),
+  bodyMedium: t(14, 20, "400", 0.25),
+  bodySmall: t(12, 16, "400", 0.4),
+  labelLarge: t(14, 20, "600", 0.1, familyMedium),
+  labelMedium: t(12, 16, "600", 0.5, familyMedium),
+  labelSmall: t(11, 16, "600", 0.5, familyMedium),
+};
+
+// ── Shape scale ──────────────────────────────────────────────────────────────
+
+export const shape = {
+  extraSmall: 4,
+  small: 8,
+  medium: 12,
+  large: 16,
+  largeIncreased: 20,
+  extraLarge: 28,
+  extraLargeIncreased: 32,
+  full: 999,
+};

@@ -1,5 +1,42 @@
 # Changelog
 
+## [2.2.1] - 2026-10-23
+
+### Changed
+
+- Background blur reworked to look like the system panels on Android 16/17: the sidebar, Tools, Volume, All Apps and the long-press menu get a frosted-glass background (window background blur through a translucent surface). Only the panels are blurred — apps around them stay sharp. Panels are Dialog-backed overlay windows so they can use `Window.setBackgroundBlurRadius`; the old full-screen `FLAG_BLUR_BEHIND` backdrop is gone
+- Calmer motion: springs are close to critically damped, the settings screen waits for saved settings before drawing (no animating from defaults on launch), tabs drift in on an eased curve, the hero icon no longer rotates
+- Colors picker: suggested themes from the wallpaper's dominant colors (like the Android wallpaper picker), basic colors, and a "Pick a color" sheet with a saturation/brightness field, hue bar, old/new preview and HEX/RGB/HSL inputs
+
+### Fixed
+
+- Locking the phone (screen off) closes the open panel, All Apps and menus right away and hides the handle until the phone is unlocked
+- Settings sliders stopped following the finger after the first value change (gestures were re-created on every render)
+- Overlay brightness/volume sliders: drawn by a single view (no relayout per move), fill initialises correctly, and lowering ring/notification volume without Do Not Disturb access no longer crashes the service
+- Brightness slider no longer reopens the "Modify system settings" screen on every touch when permission is missing
+
+## [2.2.0] - 2026-10-22
+
+### Changed
+
+- Settings app rebuilt in the Material 3 Expressive style: hero service card, segmented list groups, connected button groups, shape-morphing toggles and swatches, thick split-track sliders, an expressive switch, and a navigation bar with a springy pill indicator. Motion uses M3 Expressive spring tokens via Reanimated; tabs slide in on a shared X axis
+- Settings tabs reorganised into Look, Behavior, Controls and Apps; the Look tab shows a live preview of the handle and open panel
+- Overlay (handle, panel, Tools and Volume panels, All Apps, context menu, freeform title bar) repainted with the full M3 color scheme instead of fixed greys and the neon outline; panels get real elevation shadows
+- Overlay motion: the panel springs out of the handle with a short icon cascade, Tools/Volume grow out of the Tools button, quick tiles morph between rounded square and pill when toggled and squeeze on press, the handle swells and stretches under the finger
+- Brightness and volume use pill sliders with rounded fills that glide to tapped positions
+- "App labels" now applies to the sidebar panel
+
+### Added
+
+- Colors follow the system wallpaper palette (Material You, Android 12+) by default, or a custom color: 8 presets, a color wheel or hex input, with Tonal / Vibrant / Expressive / Fidelity palette styles
+- "Background blur" option with adjustable strength: blurs and dims apps behind the open panel and All Apps (Android 12+ cross-window blur; falls back to no blur when the system disables it, e.g. in battery saver)
+- "App info" item in the app long-press menu; empty panel shows an "add apps" button that opens the Apps tab
+- Web preview of the settings UI (`npx expo start --web`) backed by a mock native module
+
+### Removed
+
+- Panel color presets (replaced by the custom seed color)
+
 ## [2.1.0] - 2026-10-21
 
 ### Added

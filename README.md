@@ -1,4 +1,10 @@
-# Sidebar
+# Sidebar — Material 3 Expressive
+
+> Based on [alkisstam/sidebar](https://github.com/alkisstam/sidebar) by @alkisstam. This version reworks
+> the settings app and the overlay in **Material 3 Expressive**: colours from the wallpaper (Material You)
+> or your own colour, spring motion, frosted-glass panels (Android 12+ window blur) and a cleaner
+> lock-screen behaviour. See [CHANGELOG.md](CHANGELOG.md) — 2.2.0 and 2.2.1.
+
 
 An Android overlay sidebar for quick access to favorite apps. A pull-tab handle sits on the screen edge and opens a floating panel with quick controls and a grid of your chosen apps.
 
@@ -15,10 +21,12 @@ An Android overlay sidebar for quick access to favorite apps. A pull-tab handle 
 - **Drag-to-reorder favorites** via long-press on the drag indicator in the open panel
 - Persists across reboots via a foreground service and boot receiver
 - Auto-hides in fullscreen apps (configurable); battery-friendly polling that pauses when the screen is off
-- **Material You** config UI with dynamic wallpaper colors on Android 12+; four tabs (Handle, Behavior, Control, Apps) with swipe navigation
-- **Handle tab**: side (left / right / both), theme (dark / light / system), panel color picker (8 presets + color wheel), position, height, width, opacity
-- **Behavior tab**: auto-hide in fullscreen, app labels, vibration feedback, swipe sensitivity, pill gesture mapping, recent apps toggle, keyboard-on-All-Apps toggle
-- **Control tab**: redesigned icon grid with Active Controls strip (drag-to-reorder) and All Controls grid (tap to toggle); permission management for overlay, Do Not Disturb, system settings, and Usage Access
+- **Material 3 Expressive** settings UI: spring motion, shape-morphing controls, segmented lists; four tabs (Look, Behavior, Controls, Apps) with swipe navigation
+- **System or custom colors**: follows your wallpaper palette (Material You, Android 12+) or a color you pick (presets, color wheel, hex) with Tonal / Vibrant / Expressive / Fidelity styles; the overlay uses the same scheme
+- **Background blur** (Android 12+): frosted-glass panel backgrounds, with adjustable strength
+- **Look tab**: live preview, theme (auto / light / dark), colors, blur, handle side, position, height, width, opacity
+- **Behavior tab**: recent apps, app labels, keyboard on All Apps, freeform windows, auto-hide in fullscreen, vibration, swipe sensitivity, pill gesture mapping
+- **Controls tab**: drag-to-reorder active tiles, tap-to-toggle tile grid; permission management for overlay, Do Not Disturb, system settings, and Usage Access
 
 ## Gallery
 

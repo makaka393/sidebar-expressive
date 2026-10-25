@@ -8,10 +8,10 @@ import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.content.pm.ServiceInfo
 import android.graphics.*
-import android.graphics.drawable.ClipDrawable
+import android.annotation.SuppressLint
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.LayerDrawable
 import android.accessibilityservice.AccessibilityService
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -23,15 +23,21 @@ import android.os.*
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
+import android.util.TypedValue
 import android.view.*
-import android.view.animation.AccelerateInterpolator
-import android.view.animation.DecelerateInterpolator
-import android.view.animation.OvershootInterpolator
+import android.view.animation.PathInterpolator
 import android.widget.*
 import androidx.core.app.NotificationCompat
+import androidx.core.graphics.ColorUtils
+import androidx.core.view.WindowCompat
+import androidx.dynamicanimation.animation.DynamicAnimation
+import androidx.dynamicanimation.animation.FloatValueHolder
+import androidx.dynamicanimation.animation.SpringAnimation
+import androidx.dynamicanimation.animation.SpringForce
 import org.json.JSONArray
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 import rikka.shizuku.Shizuku
 
 class SidebarOverlayService : Service() {
@@ -42,18 +48,10 @@ class SidebarOverlayService : Service() {
     private var pillInnerView: View? = null
     private var pillInnerViewAlt: View? = null
     private var lastActiveSide = "right"
-    private var panelView: View? = null
-    private var dismissOverlay: View? = null
-    private var allAppsView: View? = null
-    private var allAppsDismissOverlay: View? = null
-    private var contextMenuView: View? = null
     private var showingDrawer = false
     private var shown = false
 
     private var vibrationEnabled = true
-
-    private var controlsPanelView: View? = null
-    private var volumePanelView: View? = null
 
     private val iconTypeface: android.graphics.Typeface by lazy {
         android.graphics.Typeface.createFromAsset(assets, "fonts/MaterialIcons-Regular.ttf")
@@ -112,10 +110,19 @@ class SidebarOverlayService : Service() {
             if (intent.action == Intent.ACTION_SCREEN_OFF) {
                 // No point polling for fullscreen state while the screen is off.
                 fsHandler.removeCallbacks(fsRunnable)
+                // Locking the phone closes everything and hides the handle until it is unlocked.
+                Handler(Looper.getMainLooper()).post {
+                    closeAllNow()
+                    setHandlesVisible(false)
+                }
                 return
             }
             if (!Settings.canDrawOverlays(context)) return
             Handler(Looper.getMainLooper()).post {
+                val keyguard = getSystemService(KEYGUARD_SERVICE) as KeyguardManager
+                if (intent.action == Intent.ACTION_USER_PRESENT || !keyguard.isKeyguardLocked) {
+                    setHandlesVisible(true)
+                }
                 if (handleView?.windowToken == null) {
                     addHandle()
                 } else {
@@ -184,14 +191,39 @@ class SidebarOverlayService : Service() {
         Handler(Looper.getMainLooper()).post {
             handleView?.let { runCatching { wm.removeView(it) } }
             handleViewAlt?.let { runCatching { wm.removeView(it) } }
-            panelView?.let { runCatching { wm.removeView(it) } }
-            dismissOverlay?.let { runCatching { wm.removeView(it) } }
-            allAppsView?.let { runCatching { wm.removeView(it) } }
-            allAppsDismissOverlay?.let { runCatching { wm.removeView(it) } }
-            contextMenuView?.let { runCatching { wm.removeView(it) } }
+            listOfNotNull(panelWindow, controlsPanel, volumePanel, drawerWindow, menuWindow)
+                .forEach { it.dismissNow() }
+            listOfNotNull(panelBackdrop, drawerBackdrop, menuBackdrop)
+                .forEach { runCatching { it.dialog.dismiss() } }
             freeformTitles.keys.toList().forEach { removeFreeformChrome(it) }
         }
         chromePollHandler.removeCallbacks(chromePollRunnable)
+    }
+
+    private fun setHandlesVisible(visible: Boolean) {
+        val v = if (visible) View.VISIBLE else View.INVISIBLE
+        handleView?.visibility = v
+        handleViewAlt?.visibility = v
+    }
+
+    /** Closes the panel, its sub-panels, All Apps and the long-press menu at once, without animation. */
+    private fun closeAllNow() {
+        hideContextMenu()
+        drawerWindow?.dismissNow()
+        drawerWindow = null
+        drawerBackdrop?.let { runCatching { it.dialog.dismiss() } }
+        drawerBackdrop = null
+        showingDrawer = false
+        if (shown) {
+            shown = false
+            listOfNotNull(controlsPanel, volumePanel, panelWindow).forEach { it.dismissNow() }
+            controlsPanel = null
+            volumePanel = null
+            panelWindow = null
+            toolsButton = null
+            panelBackdrop?.let { runCatching { it.dialog.dismiss() } }
+            panelBackdrop = null
+        }
     }
 
     private fun refreshHandle() {
@@ -213,8 +245,7 @@ class SidebarOverlayService : Service() {
 
     data class PillPrefs(
         val height: Int, val width: Int, val position: Float,
-        val side: String, val opacity: Float, val theme: String,
-        val panelColor: String
+        val side: String, val opacity: Float
     )
 
     data class OverlayPrefs(
@@ -243,27 +274,23 @@ class SidebarOverlayService : Service() {
         val showDnd: Boolean,
         val showVolume: Boolean,
         val controlTilesOrder: List<String>,
-        val freeformWindows: Boolean
+        val freeformWindows: Boolean,
+        val blurBehind: Boolean,
+        val blurRadius: Int
     )
 
     private fun pillPrefs(): PillPrefs {
         val p = getSharedPreferences(Prefs.FILE, MODE_PRIVATE)
-        val themeChoice = p.getString(Prefs.THEME_CHOICE, "system") ?: "system"
-        val theme = if (themeChoice == "system") {
-            val nightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
-            if (nightMode == Configuration.UI_MODE_NIGHT_YES) "dark" else "light"
-        } else {
-            p.getString(Prefs.PILL_THEME, "dark") ?: "dark"
-        }
         return PillPrefs(
             p.getInt(Prefs.PILL_HEIGHT, 80), p.getInt(Prefs.PILL_WIDTH, 10),
             p.getFloat(Prefs.PILL_POSITION, 0.5f),
             p.getString(Prefs.PILL_SIDE, "right") ?: "right",
-            p.getFloat(Prefs.PILL_OPACITY, 1.0f),
-            theme,
-            p.getString(Prefs.PANEL_COLOR, "") ?: ""
+            p.getFloat(Prefs.PILL_OPACITY, 1.0f)
         )
     }
+
+    /** Active M3 scheme: wallpaper or custom seed colors, in the chosen light/dark appearance. */
+    private fun scheme(): M3Scheme = SidebarColors.resolve(this)
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -272,34 +299,6 @@ class SidebarOverlayService : Service() {
             refreshHandle()
         }
     }
-
-    private fun resolvePanelBg(rawColor: String, alpha: Int, light: Boolean): Int {
-        if (rawColor.isNotEmpty()) {
-            try {
-                val c = Color.parseColor(rawColor)
-                return Color.argb(alpha, Color.red(c), Color.green(c), Color.blue(c))
-            } catch (_: IllegalArgumentException) {}
-        }
-        return if (light) Color.argb(alpha, 255, 251, 254) else Color.argb(alpha, 28, 27, 31)
-    }
-
-    private fun resolveControlsBg(panelBg: Int, rawColor: String, light: Boolean): Int {
-        if (rawColor.isEmpty()) return if (light) Color.argb(255, 220, 212, 230) else Color.argb(255, 54, 52, 59)
-        val hsv = FloatArray(3)
-        Color.colorToHSV(panelBg, hsv)
-        val delta = if (hsv[2] < 0.5f) 0.22f else -0.18f
-        hsv[2] = (hsv[2] + delta).coerceIn(0f, 1f)
-        return Color.HSVToColor(255, hsv)
-    }
-
-    private val panelOutlineColor = Color.parseColor("#39FF14")
-
-    private fun makeOutlinedPanelBackground(panelBg: Int, cornerRadiusDp: Int): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(panelBg)
-            cornerRadius = dp(cornerRadiusDp).toFloat()
-            setStroke(dp(2), panelOutlineColor)
-        }
 
     private fun overlayPrefs(): OverlayPrefs {
         val p = getSharedPreferences(Prefs.FILE, MODE_PRIVATE)
@@ -336,8 +335,216 @@ class SidebarOverlayService : Service() {
                     (0 until arr.length()).map { arr.getString(it) }
                 } catch (_: Exception) { default }
             },
-            p.getBoolean(Prefs.FREEFORM_WINDOWS, false)
+            p.getBoolean(Prefs.FREEFORM_WINDOWS, false),
+            p.getBoolean(Prefs.BLUR_BEHIND, false),
+            p.getInt(Prefs.BLUR_RADIUS, 20)
         )
+    }
+
+    // ── Motion (springs) ──────────────────────────────────────────────────────
+
+    private val emphasizedDecelerate = PathInterpolator(0.05f, 0.7f, 0.1f, 1f)
+    private val emphasizedAccelerate = PathInterpolator(0.3f, 0f, 0.8f, 0.15f)
+
+    private val viewSprings =
+        java.util.WeakHashMap<View, HashMap<DynamicAnimation.ViewProperty, SpringAnimation>>()
+
+    /** Springs a view property to [target], re-targeting smoothly if it is already moving. */
+    private fun View.springTo(
+        prop: DynamicAnimation.ViewProperty, target: Float,
+        stiffness: Float = SPATIAL_STIFFNESS, damping: Float = SPATIAL_DAMPING
+    ) {
+        val anim = viewSprings.getOrPut(this) { HashMap() }.getOrPut(prop) {
+            SpringAnimation(this, prop).setSpring(SpringForce())
+        }
+        anim.spring.setStiffness(stiffness).setDampingRatio(damping)
+        anim.animateToFinalPosition(target)
+    }
+
+    private fun View.cancelSprings() {
+        viewSprings.remove(this)?.values?.forEach { it.cancel() }
+    }
+
+    /** Spring-driven float for values that aren't view properties (corner radius, fill length). */
+    private class FloatSpring(
+        start: Float, stiffness: Float, damping: Float,
+        private val onUpdate: (Float) -> Unit
+    ) {
+        private val holder = FloatValueHolder(start)
+        private val anim = SpringAnimation(holder)
+            .setSpring(SpringForce().setStiffness(stiffness).setDampingRatio(damping))
+            .addUpdateListener { _, value, _ -> onUpdate(value) }
+
+        fun animateTo(target: Float) = anim.animateToFinalPosition(target)
+
+        fun snapTo(value: Float) {
+            anim.cancel()
+            holder.value = value
+            onUpdate(value)
+        }
+    }
+
+    private fun withAlpha(color: Int, alpha: Int) = ColorUtils.setAlphaComponent(color, alpha)
+
+    // ── Glass windows (frosted surfaces + blurred backdrop) ───────────────────
+
+    private fun blurAvailable(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wm.isCrossWindowBlurEnabled
+
+    private fun blurPx(oPrefs: OverlayPrefs): Int =
+        if (oPrefs.blurBehind && blurAvailable()) dp(oPrefs.blurRadius) else 0
+
+    /**
+     * An overlay window backed by a Dialog. Unlike a bare `WindowManager.addView`, a Dialog
+     * window can use Android 12+ window background blur (`Window.setBackgroundBlurRadius`),
+     * which frosts whatever is behind the window's own rounded background — the same
+     * mechanism the system uses for its panels on Android 16/17.
+     */
+    private fun overlayDialog(
+        content: View, width: Int, height: Int,
+        gravity: Int, x: Int, y: Int,
+        background: Drawable, focusable: Boolean
+    ): Dialog {
+        val dialog = Dialog(this, R.style.SidebarSurface)
+        val w = dialog.window!!
+        w.setType(overlayType())
+        dialog.setContentView(content, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            if (height == ViewGroup.LayoutParams.WRAP_CONTENT) ViewGroup.LayoutParams.WRAP_CONTENT
+            else ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        WindowCompat.setDecorFitsSystemWindows(w, false)
+        w.setBackgroundDrawable(background)
+        w.setLayout(width, height)
+        w.attributes = w.attributes.apply {
+            this.gravity = gravity
+            this.x = x
+            this.y = y
+            windowAnimations = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
+        }
+        w.addFlags(
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        )
+        if (!focusable) w.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        w.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        dialog.setCanceledOnTouchOutside(false)
+        dialog.setCancelable(focusable)
+        return dialog
+    }
+
+    private fun setWindowBlur(dialog: Dialog, px: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) dialog.window?.setBackgroundBlurRadius(px)
+    }
+
+    /** Full-screen touch catcher placed under a panel; can dim the apps behind it ([animateTo] ramps it). */
+    private inner class Backdrop(private val dim: Float, private val blurPx: Int, onTap: () -> Unit) {
+        private val bg = ColorDrawable(Color.TRANSPARENT)
+        val dialog = overlayDialog(
+            View(this@SidebarOverlayService).apply { setOnClickListener { onTap() } },
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            Gravity.TOP or Gravity.START, 0, 0, bg, focusable = false
+        )
+        private var progress = 0f
+        private var anim: ValueAnimator? = null
+
+        init { dialog.show() }
+
+        private fun apply(p: Float) {
+            progress = p
+            bg.color = Color.argb((dim * 255 * p).toInt(), 0, 0, 0)
+            if (blurPx > 0) setWindowBlur(dialog, (blurPx * p).toInt())
+        }
+
+        fun animateTo(target: Float, duration: Long, interp: TimeInterpolator, end: (() -> Unit)? = null) {
+            anim?.cancel()
+            if (dim <= 0f && blurPx <= 0) { progress = target; end?.invoke(); return }
+            anim = ValueAnimator.ofFloat(progress, target).apply {
+                this.duration = duration
+                interpolator = interp
+                addUpdateListener { a -> apply(a.animatedValue as Float) }
+                end?.let { onEnd ->
+                    addListener(object : AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: Animator) = onEnd()
+                    })
+                }
+                start()
+            }
+        }
+
+        fun dismiss() = animateTo(0f, 200, emphasizedAccelerate) { runCatching { dialog.dismiss() } }
+    }
+
+    /** Touch catcher under a panel. It never blurs the apps behind — only the panels themselves are frosted. */
+    private fun addBackdrop(scrim: Float, onTap: () -> Unit): Backdrop =
+        Backdrop(scrim, 0, onTap).also { it.animateTo(1f, 320, emphasizedDecelerate) }
+
+    /**
+     * A floating panel surface. With blur it starts opaque and turns frosted as the blur ramps
+     * up; animate [decor] (it carries the rounded background, so the blur region follows it).
+     */
+    private inner class GlassWindow(
+        content: View,
+        width: Int, height: Int,
+        gravity: Int, x: Int, y: Int,
+        radius: Float,
+        private val color: Int,
+        private val blurPx: Int,
+        focusable: Boolean = false
+    ) {
+        private val bg = GradientDrawable().apply { setColor(color); cornerRadius = radius }
+        val dialog: Dialog
+        val decor: View
+        private var anim: ValueAnimator? = null
+
+        init {
+            content.clipToOutline = true
+            content.outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, radius)
+                }
+            }
+            dialog = overlayDialog(content, width, height, gravity, x, y, bg, focusable)
+            if (blurPx <= 0) dialog.window?.setElevation(dp(6).toFloat())
+            decor = dialog.window!!.decorView
+            dialog.show()
+        }
+
+        /** Ramps the frost in: blur radius up, surface from opaque to translucent. */
+        fun frost(delay: Long = 0) {
+            if (blurPx <= 0) return
+            anim?.cancel()
+            anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                startDelay = delay
+                duration = 320
+                interpolator = emphasizedDecelerate
+                addUpdateListener { a ->
+                    val p = a.animatedValue as Float
+                    bg.setColor(ColorUtils.setAlphaComponent(color, (255 - (255 - FROST_ALPHA) * p).toInt()))
+                    setWindowBlur(dialog, (blurPx * p).toInt())
+                }
+                start()
+            }
+        }
+
+        /** Fades the surface out (with [decorAnim] moving it), closes the window, then runs [onEnd]. */
+        fun close(onEnd: (() -> Unit)? = null, decorAnim: ViewPropertyAnimator.() -> ViewPropertyAnimator = { this }) {
+            anim?.cancel()
+            decor.cancelSprings()
+            decor.animate().alpha(0f).decorAnim()
+                .setDuration(160).setInterpolator(emphasizedAccelerate)
+                .withEndAction {
+                    runCatching { dialog.dismiss() }
+                    onEnd?.invoke()
+                }
+                .start()
+        }
+
+        fun dismissNow() = runCatching { dialog.dismiss() }
     }
 
     // ── Handle ────────────────────────────────────────────────────────────────
@@ -364,7 +571,7 @@ class SidebarOverlayService : Service() {
 
     private fun buildHandle(prefs: PillPrefs, oPrefs: OverlayPrefs, side: String): Pair<View, View> {
         val pill = View(this).apply {
-            background = PullTabDrawable(highlighted = false, prefs.theme, prefs.panelColor)
+            background = PullTabDrawable(scheme().primary)
             alpha = prefs.opacity
         }
         val container = FrameLayout(this).apply {
@@ -372,7 +579,7 @@ class SidebarOverlayService : Service() {
                 gravity = if (side == "left") Gravity.START else Gravity.END
             })
         }
-        installSwipeListener(container, oPrefs.sensitivity, side)
+        installSwipeListener(container, pill, oPrefs.sensitivity, side)
         wm.addView(container, handleParams(prefs, side))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             container.post {
@@ -402,14 +609,37 @@ class SidebarOverlayService : Service() {
         }
     }
 
-    private fun installSwipeListener(handle: View, sensitivityDp: Int = 16, triggerSide: String = "right") {
+    private fun installSwipeListener(handle: View, pill: View, sensitivityDp: Int = 16, triggerSide: String = "right") {
         var downX = 0f
         var downY = 0f
         var lastTapTime = 0L
+        val inward = if (triggerSide == "left") 1f else -1f
+        val maxPull = dp(24).toFloat()
+
+        fun release() {
+            pill.springTo(DynamicAnimation.TRANSLATION_X, 0f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+            pill.springTo(DynamicAnimation.SCALE_X, 1f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+            pill.springTo(DynamicAnimation.SCALE_Y, 1f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+        }
+
         handle.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> { downX = event.rawX; downY = event.rawY; true }
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX; downY = event.rawY
+                    // Touch feedback: the pill swells from the screen edge.
+                    pill.pivotX = if (triggerSide == "left") 0f else pill.width.toFloat()
+                    pill.springTo(DynamicAnimation.SCALE_X, 1.4f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    // Elastic pull: the pill follows the finger inward a little, with resistance.
+                    val pull = ((event.rawX - downX) * inward).coerceIn(0f, maxPull)
+                    pill.springTo(DynamicAnimation.TRANSLATION_X, inward * pull * 0.35f, 1400f, 1f)
+                    pill.springTo(DynamicAnimation.SCALE_Y, 1f + 0.08f * pull / maxPull, 1400f, 1f)
+                    true
+                }
                 MotionEvent.ACTION_UP -> {
+                    release()
                     val dx = event.rawX - downX
                     val dy = event.rawY - downY
                     val adx = Math.abs(dx)
@@ -436,7 +666,7 @@ class SidebarOverlayService : Service() {
                     }
                     true
                 }
-                MotionEvent.ACTION_MOVE -> true
+                MotionEvent.ACTION_CANCEL -> { release(); true }
                 else -> false
             }
         }
@@ -478,235 +708,294 @@ class SidebarOverlayService : Service() {
         if (shown) hidePanel() else showPanel()
     }
 
+    // ── Floating surface helpers ──────────────────────────────────────────────
+
+    private fun surfaceBackground(color: Int, radiusDp: Int) = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius = dp(radiusDp).toFloat()
+    }
+
+    private fun iconText(icon: String, sizeSp: Float, color: Int) = TextView(this).apply {
+        text = icon
+        textSize = sizeSp
+        gravity = Gravity.CENTER
+        typeface = iconTypeface
+        setTextColor(color)
+        includeFontPadding = false
+    }
+
+    private val mediumTypeface: Typeface by lazy { Typeface.create("sans-serif-medium", Typeface.NORMAL) }
+
+    /**
+     * Icon button that morphs between a circle and a rounded square (selected), squeezes while
+     * pressed and cross-fades its colors — the M3 Expressive shape-morphing icon button.
+     */
+    private inner class MorphButton(
+        icon: String,
+        private val s: M3Scheme,
+        private val size: Int,
+        description: String,
+        onClick: () -> Unit
+    ) {
+        private val bg = GradientDrawable().apply { setColor(s.primaryContainer); cornerRadius = size / 2f }
+        val view: TextView = iconText(icon, 22f, s.onPrimaryContainer).apply {
+            background = bg
+            isClickable = true
+            isFocusable = true
+            contentDescription = description
+            setOnClickListener { onClick() }
+        }
+        private var selected = false
+        private var pressed = false
+        private var shownBg = s.primaryContainer
+        private var shownFg = s.onPrimaryContainer
+        private var colorAnim: ValueAnimator? = null
+        private val radius = FloatSpring(size / 2f, SPATIAL_STIFFNESS, 0.85f) { bg.cornerRadius = it }
+
+        init {
+            view.setOnTouchListener { v, e ->
+                when (e.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        pressed = true; updateShape()
+                        v.springTo(DynamicAnimation.SCALE_X, 0.92f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                        v.springTo(DynamicAnimation.SCALE_Y, 0.92f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        pressed = false; updateShape()
+                        v.springTo(DynamicAnimation.SCALE_X, 1f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                        v.springTo(DynamicAnimation.SCALE_Y, 1f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                    }
+                }
+                false
+            }
+        }
+
+        fun setSelected(value: Boolean) {
+            if (selected == value) return
+            selected = value
+            updateShape()
+            val toBg = if (value) s.primary else s.primaryContainer
+            val toFg = if (value) s.onPrimary else s.onPrimaryContainer
+            val fromBg = shownBg
+            val fromFg = shownFg
+            colorAnim?.cancel()
+            colorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 200
+                interpolator = emphasizedDecelerate
+                addUpdateListener { a ->
+                    shownBg = ColorUtils.blendARGB(fromBg, toBg, a.animatedFraction)
+                    shownFg = ColorUtils.blendARGB(fromFg, toFg, a.animatedFraction)
+                    bg.setColor(shownBg)
+                    view.setTextColor(shownFg)
+                }
+                start()
+            }
+        }
+
+        private fun updateShape() = radius.animateTo(
+            when {
+                pressed -> size * 0.22f
+                selected -> size * 0.3f
+                else -> size / 2f
+            }
+        )
+    }
+
     // ── Panel ─────────────────────────────────────────────────────────────────
+
+    private var panelWindow: GlassWindow? = null
+    private var panelBackdrop: Backdrop? = null
+    private var controlsPanel: GlassWindow? = null
+    private var volumePanel: GlassWindow? = null
+    private var drawerWindow: GlassWindow? = null
+    private var drawerBackdrop: Backdrop? = null
+    private var toolsButton: MorphButton? = null
+    private var panelFromLeft = false
 
     private fun showPanel() {
         if (shown) return
         shown = true
         val prefs = pillPrefs()
         val oPrefs = overlayPrefs()
+        val s = scheme()
         val pkgs = loadFavorites()
         val pm = packageManager
-        val light = prefs.theme == "light"
         val effectiveSide = if (prefs.side == "both") lastActiveSide else prefs.side
+        val fromLeft = effectiveSide == "left"
+        panelFromLeft = fromLeft
 
         val screenHeight = resources.displayMetrics.heightPixels
-        // Tools(56)+divider(1)+padding(12)+6 cells×68dp
-        val maxPanelHeight = dp(477)
         val recents = if (oPrefs.showRecentApps) cachedRecentApps.take(4) else emptyList()
-        val totalAppCount = recents.size + pkgs.size
-        val appH = if (totalAppCount == 0) dp(60) else totalAppCount * dp(68)
-        val panelHeight = (dp(57) + appH).coerceAtMost(maxPanelHeight).coerceAtMost(screenHeight)
+        // Tools block + list padding (80dp) + one row per app, capped at 6 rows; the list scrolls past that.
+        val rowH = if (oPrefs.showLabels) dp(80) else dp(64)
+        val rows = maxOf(1, recents.size + pkgs.size)
+        val dividerH = if (recents.isNotEmpty() && pkgs.isNotEmpty()) dp(14) else 0
+        val panelHeight = (dp(80) + minOf(rows, 6) * rowH + dividerH)
+            .coerceAtMost(screenHeight - dp(16))
         val handleCenterY = (prefs.position * screenHeight).toInt()
-        val panelY = (handleCenterY - panelHeight / 2).coerceIn(0, maxOf(0, screenHeight - panelHeight))
+        val panelY = (handleCenterY - panelHeight / 2).coerceIn(dp(8), maxOf(dp(8), screenHeight - panelHeight - dp(8)))
 
-        val overlay = View(this).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            setOnClickListener { hidePanel() }
-        }
-        wm.addView(overlay, WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ))
-        dismissOverlay = overlay
+        panelBackdrop = addBackdrop(0f) { hidePanel() }
 
-        val panelBg = resolvePanelBg(prefs.panelColor, 248, light)
-        val effectiveLight = if (prefs.panelColor.isNotEmpty()) {
-            val hsv = FloatArray(3); Color.colorToHSV(panelBg, hsv); hsv[2] > 0.5f
-        } else light
-        val labelColor = if (effectiveLight) Color.argb(230, 28, 27, 31) else Color.argb(230, 230, 225, 229)
-        val emptyColor = if (effectiveLight) Color.argb(160, 73, 69, 79) else Color.argb(160, 202, 196, 208)
-        val iconColor  = if (effectiveLight) Color.argb(200, 28, 27, 31) else Color.argb(200, 230, 225, 229)
-
-        val root = LinearLayout(this).apply {
+        val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = makeOutlinedPanelBackground(panelBg, 32)
-            elevation = dp(8).toFloat()
-            clipToOutline = true
-            outlineProvider = ViewOutlineProvider.BACKGROUND
+            gravity = Gravity.CENTER_HORIZONTAL
         }
 
-        val toolsBtn = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56))
-            isClickable = true
-            isFocusable = true
+        val tools = MorphButton("", s, dp(48), "Tools") {
+            toggleControlsPanel(oPrefs, fromLeft, panelY)
         }
-        toolsBtn.addView(TextView(this).apply {
-            text = ""
-            textSize = 20f
-            gravity = Gravity.CENTER
-            setTextColor(iconColor)
-            typeface = iconTypeface
-        })
-        toolsBtn.addView(TextView(this).apply {
-            text = "Tools"
-            textSize = 9f
-            gravity = Gravity.CENTER
-            setTextColor(iconColor)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(2) }
-        })
-        toolsBtn.setOnClickListener { toggleControlsPanel(prefs, oPrefs, effectiveSide, panelY) }
-        root.addView(toolsBtn)
+        toolsButton = tools
+        column.addView(tools.view, LinearLayout.LayoutParams(dp(48), dp(48)).apply { topMargin = dp(8) })
 
-
-        root.addView(View(this).apply {
-            setBackgroundColor(Color.argb(40, 128, 128, 128))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 1
-            ).apply { marginStart = dp(8); marginEnd = dp(8) }
+        fun divider() = View(this).apply {
+            background = surfaceBackground(s.outlineVariant, 1)
+            layoutParams = LinearLayout.LayoutParams(dp(24), dp(2)).apply {
+                topMargin = dp(6); bottomMargin = dp(6); gravity = Gravity.CENTER_HORIZONTAL
+            }
+        }
+        column.addView(divider().apply {
+            (layoutParams as LinearLayout.LayoutParams).apply { topMargin = dp(10); bottomMargin = dp(4) }
         })
 
-        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(4), dp(4), dp(4), dp(8))
+        val scroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(8))
+        }
+        val cells = mutableListOf<View>()
 
         fun loadCell(pkg: String): View? {
             val cached = appIconCache[pkg]
-            val cell = if (cached != null) {
-                makeAppCell(pkg, cached.first, cached.second, labelColor, false)
-            } else {
-                try {
-                    val info = pm.getApplicationInfo(pkg, 0)
-                    makeAppCell(pkg, pm.getApplicationLabel(info).toString(),
-                        pm.getApplicationIcon(pkg), labelColor, false)
-                } catch (e: Exception) { null }
-            }
-            return cell?.also { v ->
-                (v as? ViewGroup)?.getChildAt(0)?.let { iv ->
-                    iv.clipToOutline = true
-                    iv.outlineProvider = object : ViewOutlineProvider() {
-                        override fun getOutline(view: View, outline: android.graphics.Outline) {
-                            outline.setOval(0, 0, view.width, view.height)
-                        }
-                    }
-                }
-            }
-        }
-
-        for (pkg in recents) {
-            loadCell(pkg)?.let { cell ->
-                cell.layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                container.addView(cell)
-            }
-        }
-        if (recents.isNotEmpty() && pkgs.isNotEmpty()) {
-            container.addView(View(this).apply {
-                setBackgroundColor(Color.argb(40, 128, 128, 128))
+            val (name, icon) = cached ?: try {
+                val info = pm.getApplicationInfo(pkg, 0)
+                Pair(pm.getApplicationLabel(info).toString(), pm.getApplicationIcon(pkg))
+            } catch (e: Exception) { return null }
+            return makeAppCell(pkg, name, icon, s, showLabel = oPrefs.showLabels, circular = true).apply {
                 layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
-                ).apply { marginStart = dp(8); marginEnd = dp(8); topMargin = dp(4); bottomMargin = dp(4) }
-            })
-        }
-
-        if (pkgs.isEmpty() && recents.isEmpty()) {
-            container.addView(TextView(this).apply {
-                text = "No\nfavs"
-                setTextColor(emptyColor)
-                textSize = 11f
-                gravity = Gravity.CENTER
-                setPadding(dp(4), dp(16), dp(4), dp(16))
-            })
-        } else {
-            for (pkg in pkgs) {
-                loadCell(pkg)?.let { cell ->
-                    cell.layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                    container.addView(cell)
-                }
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             }
         }
 
-        scroll.addView(container)
-        root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        for (pkg in recents) loadCell(pkg)?.let { list.addView(it); cells.add(it) }
+        if (recents.isNotEmpty() && pkgs.isNotEmpty()) list.addView(divider())
+        for (pkg in pkgs) loadCell(pkg)?.let { list.addView(it); cells.add(it) }
 
-        val panelGravity = if (effectiveSide == "left") Gravity.START or Gravity.TOP
-                           else Gravity.END or Gravity.TOP
-        wm.addView(root, WindowManager.LayoutParams(
-            dp(64), panelHeight,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = panelGravity; x = dp(8); y = panelY })
+        if (cells.isEmpty()) {
+            // Empty state: a single "add" button that opens the Apps tab in settings.
+            val add = MorphButton("", s, dp(48), "Add apps") { openEditor() }
+            list.addView(add.view, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(8)
+            })
+        }
 
-        panelView = root
+        scroll.addView(list)
+        column.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val gravity = (if (fromLeft) Gravity.START else Gravity.END) or Gravity.TOP
+        val glass = GlassWindow(column, dp(64), panelHeight, gravity, dp(8), panelY,
+            dp(32).toFloat(), s.surfaceContainer, blurPx(oPrefs))
+        panelWindow = glass
         handleView?.visibility = View.INVISIBLE
         handleViewAlt?.visibility = View.INVISIBLE
 
-        val slideFrom = if (effectiveSide == "left") -dp(64).toFloat() else dp(64).toFloat()
-        root.translationX = slideFrom
-        root.alpha = 0f
-        root.scaleX = 0.92f
-        root.scaleY = 0.96f
-        root.animate().withLayer()
-            .translationX(0f).alpha(1f).scaleX(1f).scaleY(1f)
-            .setDuration(220).setInterpolator(DecelerateInterpolator(2.5f))
-            .start()
+        // Enter: the column grows out of the handle edge and settles without bouncing…
+        val decor = glass.decor
+        val edgeOffset = (if (fromLeft) -dp(32) else dp(32)).toFloat()
+        decor.pivotX = if (fromLeft) 0f else dp(64).toFloat()
+        decor.pivotY = (handleCenterY - panelY).toFloat().coerceIn(0f, panelHeight.toFloat())
+        decor.translationX = edgeOffset
+        decor.scaleX = 0.7f
+        decor.scaleY = 0.9f
+        decor.alpha = 0f
+        decor.animate().alpha(1f).setDuration(150).setInterpolator(emphasizedDecelerate).start()
+        decor.springTo(DynamicAnimation.TRANSLATION_X, 0f, 600f, 0.9f)
+        decor.springTo(DynamicAnimation.SCALE_X, 1f, 600f, 0.88f)
+        decor.springTo(DynamicAnimation.SCALE_Y, 1f, 600f, 0.9f)
+        glass.frost(delay = 60)
+
+        // …and the first icons follow in a short cascade.
+        cells.take(8).forEachIndexed { i, cell ->
+            cell.alpha = 0f
+            cell.translationX = edgeOffset / 4
+            cell.animate().alpha(1f).translationX(0f)
+                .setStartDelay(50L + i * 18L).setDuration(240)
+                .setInterpolator(emphasizedDecelerate).start()
+        }
     }
 
-    private fun toggleControlsPanel(prefs: PillPrefs, oPrefs: OverlayPrefs, effectiveSide: String, panelY: Int) {
-        volumePanelView?.let { runCatching { wm.removeViewImmediate(it) } }
-        volumePanelView = null
+    private fun openEditor() {
+        hidePanel()
+        getSharedPreferences(Prefs.FILE, MODE_PRIVATE).edit().putString(Prefs.LAUNCH_TAB, "apps").apply()
+        packageManager.getLaunchIntentForPackage(packageName)
+            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT) }
+            ?.let { startActivity(it) }
+    }
 
-        val existing = controlsPanelView
-        if (existing != null) {
-            controlsPanelView = null
-            val slideTo = if (effectiveSide == "left") -dp(220).toFloat() else dp(220).toFloat()
-            existing.animate().withLayer()
-                .translationX(slideTo).alpha(0f)
-                .setDuration(160).setInterpolator(AccelerateInterpolator(2.2f))
-                .withEndAction { runCatching { wm.removeViewImmediate(existing) } }
-                .start()
+    /** Places a Tools/Volume surface beside the sidebar column and grows it out of the Tools button. */
+    private fun showSubSurface(content: View, oPrefs: OverlayPrefs, fromLeft: Boolean, panelY: Int, estimatedHeight: Int): GlassWindow {
+        val s = scheme()
+        val screenHeight = resources.displayMetrics.heightPixels
+        val width = dp(232)
+        val y = panelY.coerceIn(dp(8), maxOf(dp(8), screenHeight - estimatedHeight - dp(8)))
+        val gravity = (if (fromLeft) Gravity.START else Gravity.END) or Gravity.TOP
+        val glass = GlassWindow(content, width, WindowManager.LayoutParams.WRAP_CONTENT, gravity, dp(80), y,
+            dp(28).toFloat(), s.surfaceContainer, blurPx(oPrefs))
+
+        val decor = glass.decor
+        decor.pivotX = if (fromLeft) 0f else width.toFloat()
+        decor.pivotY = (panelY - y + dp(32)).toFloat()
+        decor.alpha = 0f
+        decor.scaleX = 0.85f
+        decor.scaleY = 0.85f
+        decor.animate().alpha(1f).setDuration(140).setInterpolator(emphasizedDecelerate).start()
+        decor.springTo(DynamicAnimation.SCALE_X, 1f, 600f, 0.88f)
+        decor.springTo(DynamicAnimation.SCALE_Y, 1f, 600f, 0.88f)
+        glass.frost(delay = 40)
+        return glass
+    }
+
+    private fun closeSubSurface(glass: GlassWindow?) = glass?.close { scaleX(0.92f).scaleY(0.92f) }
+
+    private fun toggleControlsPanel(oPrefs: OverlayPrefs, fromLeft: Boolean, panelY: Int) {
+        closeSubSurface(volumePanel)
+        volumePanel = null
+
+        controlsPanel?.let {
+            closeSubSurface(it)
+            controlsPanel = null
+            toolsButton?.setSelected(false)
             return
         }
 
-        val light = prefs.theme == "light"
-        val panelBg    = resolvePanelBg(prefs.panelColor, 248, light)
-        val effectiveLight = if (prefs.panelColor.isNotEmpty()) {
-            val hsv = FloatArray(3); Color.colorToHSV(panelBg, hsv); hsv[2] > 0.5f
-        } else light
-        val tileBg     = if (effectiveLight) Color.argb(130, 115, 105, 130) else Color.argb(130, 55, 52, 62)
-        val tileActive = if (effectiveLight) Color.argb(255, 103, 80, 164)  else Color.argb(255, 79, 55, 139)
-        val labelColor = if (effectiveLight) Color.argb(230, 28, 27, 31)    else Color.argb(230, 230, 225, 229)
-
+        val s = scheme()
         val ctrl = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = makeOutlinedPanelBackground(panelBg, 22)
-            elevation = dp(8).toFloat()
-            clipToOutline = true
-            outlineProvider = ViewOutlineProvider.BACKGROUND
-            setPadding(dp(6), dp(8), dp(6), dp(8))
+            setPadding(dp(10), dp(10), dp(10), dp(10))
         }
 
         if (oPrefs.showBrightnessSlider) {
-            val sliderRow = makeBrightnessSliderRow(
-                "", getBrightness(), 0, 255, labelColor, tileActive, tileBg
+            val slider = PillSlider(
+                vertical = false, icon = "",
+                initial = getBrightness(), min = 0, max = 255, s = s
             ) { setBrightness(it) }
-            ctrl.addView(sliderRow, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
-            ).apply { bottomMargin = dp(6) })
+            ctrl.addView(slider, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
+            ).apply { bottomMargin = dp(6); marginStart = dp(3); marginEnd = dp(3) })
         }
 
         val tileBuilders: Map<String, (() -> View)?> = mapOf(
-            "torch"      to (if (oPrefs.showTorch)        ({ makeControlTile("Torch",   { "" }, tileBg, tileActive, { torchEnabled },          { if (torchEnabled) "On" else "Off" })           { toggleTorch() } }) else null),
-            "rotate"     to (if (oPrefs.showAutoRotate)   ({ makeControlTile("Rotate",  { "" }, tileBg, tileActive, { isAutoRotateEnabled() },  { if (isAutoRotateEnabled()) "On" else "Off" })  { toggleAutoRotate() } }) else null),
-            "brightness" to (if (oPrefs.showAutoBrightness)({ makeControlTile("Brightness", { "" }, tileBg, tileActive, { isAutoBrightnessEnabled() }, { if (isAutoBrightnessEnabled()) "Auto" else "Manual" }) { toggleAutoBrightness() } }) else null),
-            "ringer"     to (if (oPrefs.showRingerMode)   ({ makeControlTile("Ringer",  { getRingerIcon() }, tileBg, tileActive, { isRingerActive() }, { getRingerSubtitle() })                        { toggleRingerMode() } }) else null),
-            "share"      to (if (oPrefs.showQuickShare)   ({ makeControlTile("Share",   { "" }, tileBg, tileActive, { false },                 { "" })                                          { launchQuickShare() } }) else null),
-            "power"      to (if (oPrefs.showPower)        ({ makeControlTile("Power",   { "" }, tileBg, tileActive, { false },                 { "" })                                          { openPowerMenu() } }) else null),
-            "qr"         to (if (oPrefs.showQr)           ({ makeControlTile("QR Scan", { "" }, tileBg, tileActive, { false },                 { "" })                                          { launchQrScanner() } }) else null),
-            "dnd"        to (if (oPrefs.showDnd)          ({ makeControlTile("DND",     { if (isDndEnabled()) "" else "" }, tileBg, tileActive, { isDndEnabled() }, { if (isDndEnabled()) "On" else "Off" }) { toggleDnd() } }) else null),
+            "torch"      to (if (oPrefs.showTorch)         ({ makeControlTile("Torch",      { "" }, s, { torchEnabled },             { if (torchEnabled) "On" else "Off" })                    { toggleTorch() } }) else null),
+            "rotate"     to (if (oPrefs.showAutoRotate)    ({ makeControlTile("Rotate",     { "" }, s, { isAutoRotateEnabled() },     { if (isAutoRotateEnabled()) "On" else "Off" })           { toggleAutoRotate() } }) else null),
+            "brightness" to (if (oPrefs.showAutoBrightness)({ makeControlTile("Brightness", { "" }, s, { isAutoBrightnessEnabled() }, { if (isAutoBrightnessEnabled()) "Auto" else "Manual" })  { toggleAutoBrightness() } }) else null),
+            "ringer"     to (if (oPrefs.showRingerMode)    ({ makeControlTile("Ringer",     { getRingerIcon() }, s, { isRingerActive() },  { getRingerSubtitle() })                                  { toggleRingerMode() } }) else null),
+            "share"      to (if (oPrefs.showQuickShare)    ({ makeControlTile("Share",      { "" }, s, { false },                     { "" })                                                   { launchQuickShare() } }) else null),
+            "power"      to (if (oPrefs.showPower)         ({ makeControlTile("Power",      { "" }, s, { false },                     { "" })                                                   { openPowerMenu() } }) else null),
+            "qr"         to (if (oPrefs.showQr)            ({ makeControlTile("QR Scan",    { "" }, s, { false },                     { "" })                                                   { launchQrScanner() } }) else null),
+            "dnd"        to (if (oPrefs.showDnd)           ({ makeControlTile("DND",        { if (isDndEnabled()) "" else "" }, s, { isDndEnabled() }, { if (isDndEnabled()) "On" else "Off" }) { toggleDnd() } }) else null),
         )
         val knownOrder = oPrefs.controlTilesOrder
         val tileViews = mutableListOf<View>()
@@ -715,103 +1004,58 @@ class SidebarOverlayService : Service() {
             if (id !in knownOrder) builder?.invoke()?.let { tileViews.add(it) }
         }
 
+        fun row(first: Boolean) = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { if (!first) topMargin = dp(6) }
+        }
+
         tileViews.chunked(3).forEachIndexed { idx, chunk ->
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { if (idx > 0 || oPrefs.showBrightnessSlider) topMargin = dp(6) }
-            }
-            chunk.forEach { row.addView(it) }
+            val r = row(first = idx == 0 && !oPrefs.showBrightnessSlider)
+            chunk.forEach { r.addView(it) }
             repeat(3 - chunk.size) {
-                row.addView(View(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, dp(60), 1f).apply {
+                r.addView(View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, dp(64), 1f).apply {
                         marginStart = dp(3); marginEnd = dp(3)
                     }
                 })
             }
-            ctrl.addView(row)
+            ctrl.addView(r)
         }
 
-        val actRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { if (tileViews.isNotEmpty() || oPrefs.showBrightnessSlider) topMargin = dp(6) }
-        }
-        if (oPrefs.showVolume) actRow.addView(makeControlTile("Volume", { "" }, tileBg, tileActive,
-            { false }, { "" }) { toggleVolumePanel(prefs, effectiveSide, panelY) })
-        actRow.addView(makeControlTile("All Apps", { "" }, tileBg, tileActive,
-            { false }, { "" }) { showAllAppsDrawer() })
-        actRow.addView(makeControlTile("Edit", { "" }, tileBg, tileActive,
-            { false }, { "" }) {
-            hidePanel()
-            getSharedPreferences(Prefs.FILE, MODE_PRIVATE).edit().putString(Prefs.LAUNCH_TAB, "apps").apply()
-            packageManager.getLaunchIntentForPackage(packageName)
-                ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT) }
-                ?.let { startActivity(it) }
-        })
+        val actRow = row(first = tileViews.isEmpty() && !oPrefs.showBrightnessSlider)
+        if (oPrefs.showVolume) actRow.addView(makeControlTile("Volume", { "" }, s,
+            { false }, { "" }, TileStyle.ACTION) { toggleVolumePanel(oPrefs, fromLeft, panelY) })
+        actRow.addView(makeControlTile("All Apps", { "" }, s,
+            { false }, { "" }, TileStyle.ACTION) { showAllAppsDrawer() })
+        actRow.addView(makeControlTile("Edit", { "" }, s,
+            { false }, { "" }, TileStyle.ACTION) { openEditor() })
         ctrl.addView(actRow)
 
-        val screenHeight = resources.displayMetrics.heightPixels
-        val panelGravity = if (effectiveSide == "left") Gravity.START or Gravity.TOP
-                           else Gravity.END or Gravity.TOP
-        wm.addView(ctrl, WindowManager.LayoutParams(
-            dp(220), WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = panelGravity; x = dp(76); y = panelY.coerceIn(0, maxOf(0, screenHeight - dp(200))) })
-
-        controlsPanelView = ctrl
-
-        val slideFrom = if (effectiveSide == "left") -dp(220).toFloat() else dp(220).toFloat()
-        ctrl.translationX = slideFrom
-        ctrl.alpha = 0f
-        ctrl.animate().withLayer()
-            .translationX(0f).alpha(1f)
-            .setDuration(220).setInterpolator(DecelerateInterpolator(2.5f))
-            .start()
+        val rowsCount = (tileViews.size + 2) / 3 + 1
+        val estimated = dp(20) + (if (oPrefs.showBrightnessSlider) dp(54) else 0) + rowsCount * dp(70)
+        controlsPanel = showSubSurface(ctrl, oPrefs, fromLeft, panelY, estimated)
+        toolsButton?.setSelected(true)
     }
 
-    private fun toggleVolumePanel(prefs: PillPrefs, effectiveSide: String, panelY: Int) {
-        controlsPanelView?.let { runCatching { wm.removeViewImmediate(it) } }
-        controlsPanelView = null
+    private fun toggleVolumePanel(oPrefs: OverlayPrefs, fromLeft: Boolean, panelY: Int) {
+        closeSubSurface(controlsPanel)
+        controlsPanel = null
 
-        val existing = volumePanelView
-        if (existing != null) {
-            volumePanelView = null
-            val slideTo = if (effectiveSide == "left") -dp(220).toFloat() else dp(220).toFloat()
-            existing.animate().withLayer()
-                .translationX(slideTo).alpha(0f)
-                .setDuration(160).setInterpolator(AccelerateInterpolator(2.2f))
-                .withEndAction { runCatching { wm.removeViewImmediate(existing) } }
-                .start()
+        volumePanel?.let {
+            closeSubSurface(it)
+            volumePanel = null
+            toolsButton?.setSelected(false)
             return
         }
 
-        val light = prefs.theme == "light"
-        val panelBg    = resolvePanelBg(prefs.panelColor, 248, light)
-        val effectiveLight = if (prefs.panelColor.isNotEmpty()) {
-            val hsv = FloatArray(3); Color.colorToHSV(panelBg, hsv); hsv[2] > 0.5f
-        } else light
-        val tileBg     = if (effectiveLight) Color.argb(130, 115, 105, 130) else Color.argb(130, 55, 52, 62)
-        val tileActive = if (effectiveLight) Color.argb(255, 103, 80, 164)  else Color.argb(255, 79, 55, 139)
-        val labelColor = if (effectiveLight) Color.argb(230, 28, 27, 31)    else Color.argb(230, 230, 225, 229)
-
+        val s = scheme()
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
 
         val ctrl = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = makeOutlinedPanelBackground(panelBg, 22)
-            elevation = dp(8).toFloat()
-            clipToOutline = true
-            outlineProvider = ViewOutlineProvider.BACKGROUND
-            clipChildren = false
-            clipToPadding = false
-            setPadding(dp(8), dp(12), dp(8), dp(12))
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(8), dp(14), dp(8), dp(12))
         }
 
         val streams = listOf(
@@ -821,148 +1065,71 @@ class SidebarOverlayService : Service() {
             Triple(AudioManager.STREAM_ALARM,        "", "Alarm")
         )
 
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            clipChildren = false
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        }
-
         for ((stream, icon, label) in streams) {
-            val maxVol = am.getStreamMaxVolume(stream)
-            val curVol = am.getStreamVolume(stream)
-
             val col = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
-                clipChildren = false
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
-
-            col.addView(TextView(this).apply {
-                text = icon
-                textSize = 18f
-                gravity = Gravity.CENTER
-                setTextColor(labelColor)
-                typeface = iconTypeface
-                background = GradientDrawable().apply { setColor(tileBg); cornerRadius = dp(12).toFloat() }
-                val sz = dp(40)
-                setPadding(dp(4), dp(4), dp(4), dp(4))
-                layoutParams = LinearLayout.LayoutParams(sz, sz)
-            })
-
-            val sliderVisualW = dp(36)
-            val sliderVisualH = dp(160)
-            val frame = FrameLayout(this).apply {
-                clipChildren = false
-                clipToPadding = false
-                layoutParams = LinearLayout.LayoutParams(sliderVisualW, sliderVisualH).apply { topMargin = dp(10) }
+            val slider = PillSlider(
+                vertical = true, icon = icon,
+                initial = am.getStreamVolume(stream), min = 0, max = am.getStreamMaxVolume(stream), s = s
+            ) { level ->
+                // Ring/notification volume 0 flips the ringer mode, which needs DND access.
+                try { am.setStreamVolume(stream, level, 0) }
+                catch (e: SecurityException) { Log.w(TAG, "setStreamVolume($stream) denied", e) }
             }
-            val trackH = sliderVisualW
-            val r = trackH / 2f
-            val bgGd = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE; cornerRadius = r; setColor(tileBg)
-            }
-            val fillGd = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE; cornerRadius = r; setColor(tileActive)
-            }
-            val trackDrawable = LayerDrawable(arrayOf(bgGd,
-                ClipDrawable(fillGd, Gravity.START, ClipDrawable.HORIZONTAL))).apply {
-                setId(0, android.R.id.background); setId(1, android.R.id.progress)
-            }
-            val seekBar = SeekBar(this).apply {
-                max = maxVol
-                progress = curVol
-                rotation = -90f
-                progressDrawable = trackDrawable
-                thumb = null
-                splitTrack = false
-                layoutParams = FrameLayout.LayoutParams(sliderVisualH, sliderVisualW, Gravity.CENTER)
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                        if (fromUser) am.setStreamVolume(stream, progress, 0)
-                    }
-                    override fun onStartTrackingTouch(sb: SeekBar) {}
-                    override fun onStopTrackingTouch(sb: SeekBar) {}
-                })
-            }
-            frame.addView(seekBar)
-            col.addView(frame)
-
+            col.addView(slider, LinearLayout.LayoutParams(dp(44), dp(176)))
             col.addView(TextView(this).apply {
                 text = label
-                textSize = 10f
+                textSize = 11f
+                typeface = mediumTypeface
                 gravity = Gravity.CENTER
-                setTextColor(labelColor)
+                setTextColor(s.onSurfaceVariant)
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
                 ).apply { topMargin = dp(8) }
             })
-
-            row.addView(col)
+            ctrl.addView(col)
         }
-        ctrl.addView(row)
 
-        val screenHeight = resources.displayMetrics.heightPixels
-        val panelGravity = if (effectiveSide == "left") Gravity.START or Gravity.TOP
-                           else Gravity.END or Gravity.TOP
-        wm.addView(ctrl, WindowManager.LayoutParams(
-            dp(220), WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = panelGravity; x = dp(76); y = panelY.coerceIn(0, maxOf(0, screenHeight - dp(300))) })
-
-        volumePanelView = ctrl
-
-        val slideFrom = if (effectiveSide == "left") -dp(220).toFloat() else dp(220).toFloat()
-        ctrl.translationX = slideFrom
-        ctrl.alpha = 0f
-        ctrl.animate().withLayer()
-            .translationX(0f).alpha(1f)
-            .setDuration(220).setInterpolator(DecelerateInterpolator(2.5f))
-            .start()
+        volumePanel = showSubSurface(ctrl, oPrefs, fromLeft, panelY, dp(240))
+        toolsButton?.setSelected(true)
     }
 
     private fun hidePanel() {
         if (!shown) return
         shown = false
         appLoadExecutor.submit { cachedRecentApps = getRecentApps(4) }
-        controlsPanelView?.let { runCatching { wm.removeViewImmediate(it) } }
-        controlsPanelView = null
-        volumePanelView?.let { runCatching { wm.removeViewImmediate(it) } }
-        volumePanelView = null
-        val panel = panelView ?: run {
-            dismissOverlay?.let { runCatching { wm.removeViewImmediate(it) } }
-            dismissOverlay = null
-            handleView?.visibility = View.VISIBLE
-            handleViewAlt?.visibility = View.VISIBLE
-            return
-        }
-        panelView = null
-        val prefs = pillPrefs()
-        val effectiveSide = if (prefs.side == "both") lastActiveSide else prefs.side
-        val overlay = dismissOverlay
-        dismissOverlay = null
+        closeSubSurface(controlsPanel)
+        controlsPanel = null
+        closeSubSurface(volumePanel)
+        volumePanel = null
+        toolsButton = null
+
+        panelBackdrop?.dismiss()
+        panelBackdrop = null
+
+        val glass = panelWindow
+        panelWindow = null
         val handle = handleView
         val handleAlt = handleViewAlt
 
-        val slideTo = if (effectiveSide == "left") -dp(64).toFloat() else dp(64).toFloat()
-        panel.animate().withLayer()
-            .translationX(slideTo).alpha(0f)
-            .setDuration(160).setInterpolator(AccelerateInterpolator(2.2f))
-            .withEndAction {
-                panel.alpha = 0f
-                runCatching { wm.removeViewImmediate(panel) }
-                overlay?.let { runCatching { wm.removeViewImmediate(it) } }
-                if (!showingDrawer) {
-                    handle?.visibility = View.VISIBLE
-                    handleAlt?.visibility = View.VISIBLE
-                }
+        fun restoreHandles() {
+            if (showingDrawer) return
+            for (h in listOfNotNull(handle, handleAlt)) {
+                h.alpha = 0f
+                h.visibility = View.VISIBLE
+                h.animate().alpha(1f).setDuration(200).start()
             }
-            .start()
+        }
+
+        if (glass == null) {
+            restoreHandles()
+            return
+        }
+        val toX = (if (panelFromLeft) -dp(40) else dp(40)).toFloat()
+        glass.close(onEnd = { restoreHandles() }) { translationX(toX).scaleX(0.8f).scaleY(0.92f) }
     }
 
     // ── All Apps drawer ───────────────────────────────────────────────────────
@@ -971,123 +1138,97 @@ class SidebarOverlayService : Service() {
         showingDrawer = true
         hidePanel()
         vibrate()
-        val p = pillPrefs()
         val oPrefs = overlayPrefs()
-        val light = p.theme == "light"
+        val s = scheme()
         val dm = resources.displayMetrics
-        val drawerW = (dm.widthPixels * 0.8).toInt()
+        val drawerW = (dm.widthPixels * 0.86).toInt().coerceAtMost(dp(560))
         val drawerH = (dm.heightPixels * 0.72).toInt()
 
-        val panelBg    = resolvePanelBg(p.panelColor, 252, light)
-        val effectiveLight = if (p.panelColor.isNotEmpty()) {
-            val hsv = FloatArray(3); Color.colorToHSV(panelBg, hsv); hsv[2] > 0.5f
-        } else light
-        val tileBg     = if (effectiveLight) Color.argb(130, 115, 105, 130) else Color.argb(130, 55, 52, 62)
-        val labelColor = if (effectiveLight) Color.argb(140, 28, 27, 31)    else Color.argb(140, 230, 225, 229)
-        val indClr     = if (effectiveLight) Color.argb(60, 0, 0, 0)        else Color.argb(80, 255, 255, 255)
-
-        val dismissView = View(this).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            setOnClickListener { hideAllAppsDrawer() }
-        }
-        wm.addView(dismissView, WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
-            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ))
-        allAppsDismissOverlay = dismissView
+        drawerBackdrop = addBackdrop(0.32f) { hideAllAppsDrawer() }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = makeOutlinedPanelBackground(panelBg, 24)
-            elevation = dp(8).toFloat()
-            clipToOutline = true
-            outlineProvider = ViewOutlineProvider.BACKGROUND
         }
 
         // Header row
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(12), dp(12), dp(8))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            setPadding(dp(24), dp(16), dp(12), dp(4))
         }
         header.addView(TextView(this).apply {
-            text = "All Apps"
-            textSize = 16f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(labelColor)
+            text = "All apps"
+            textSize = 22f
+            typeface = mediumTypeface
+            setTextColor(s.onSurface)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
-        header.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setTextColor(labelColor)
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = GradientDrawable().apply { setColor(tileBg); cornerRadius = dp(20).toFloat() }
+        header.addView(iconText("", 20f, s.onSurfaceVariant).apply {
+            background = surfaceBackground(s.surfaceContainerHighest, 20)
+            contentDescription = "Close"
             isClickable = true; isFocusable = true
             setOnClickListener { hideAllAppsDrawer() }
-        })
+        }, LinearLayout.LayoutParams(dp(40), dp(40)))
         root.addView(header)
 
-        root.addView(View(this).apply {
-            setBackgroundColor(indClr)
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
-        })
-
         // Search bar
-        val hintColor = Color.argb(120, Color.red(labelColor), Color.green(labelColor), Color.blue(labelColor))
+        val searchBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = surfaceBackground(withAlpha(s.surfaceContainerHighest, 230), 26)
+            setPadding(dp(16), 0, dp(16), 0)
+        }
+        searchBar.addView(iconText("", 20f, s.onSurfaceVariant), LinearLayout.LayoutParams(dp(24), dp(24)))
         val searchBox = android.widget.EditText(this).apply {
             hint = "Search apps"
-            textSize = 14f
-            setTextColor(labelColor)
-            setHintTextColor(hintColor)
-            background = GradientDrawable().apply { setColor(tileBg); cornerRadius = dp(20).toFloat() }
-            setPadding(dp(16), dp(10), dp(16), dp(10))
+            textSize = 16f
+            setTextColor(s.onSurface)
+            setHintTextColor(s.onSurfaceVariant)
+            background = null
+            setPadding(dp(12), 0, 0, 0)
             isSingleLine = true
             inputType = android.text.InputType.TYPE_CLASS_TEXT
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_GO
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(dp(12), dp(8), dp(12), dp(8)) }
         }
-        root.addView(searchBox)
+        searchBar.addView(searchBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        root.addView(searchBar, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(52)
+        ).apply { setMargins(dp(16), dp(12), dp(16), dp(8)) })
 
         // Scrollable grid
         val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
         val grid = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(16))
+            setPadding(dp(8), dp(4), dp(8), dp(16))
         }
         grid.addView(TextView(this).apply {
             text = "Loading…"
-            setTextColor(labelColor)
+            setTextColor(s.onSurfaceVariant)
             gravity = Gravity.CENTER
             setPadding(0, dp(40), 0, dp(40))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        })
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         scroll.addView(grid)
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        wm.addView(root, WindowManager.LayoutParams(
-            drawerW, drawerH,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.CENTER
-            if (oPrefs.showKeyboardOnAllApps) {
-                softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
-            }
-        })
-        allAppsView = root
+        val glass = GlassWindow(root, drawerW, drawerH, Gravity.CENTER, 0, 0,
+            dp(28).toFloat(), s.surfaceContainer, blurPx(oPrefs), focusable = true)
+        if (oPrefs.showKeyboardOnAllApps) {
+            glass.dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        }
+        // Back closes the drawer; the dialog has already dismissed itself by then.
+        glass.dialog.setOnCancelListener { hideAllAppsDrawer(animate = false) }
+        drawerWindow = glass
 
-        root.alpha = 0f; root.scaleX = 0.92f; root.scaleY = 0.92f
-        root.animate().withLayer().alpha(1f).scaleX(1f).scaleY(1f)
-            .setDuration(240).setInterpolator(OvershootInterpolator(1.0f)).start()
+        val decor = glass.decor
+        decor.alpha = 0f
+        decor.scaleX = 0.92f
+        decor.scaleY = 0.92f
+        decor.translationY = dp(16).toFloat()
+        decor.animate().alpha(1f).setDuration(160).setInterpolator(emphasizedDecelerate).start()
+        decor.springTo(DynamicAnimation.SCALE_X, 1f, 500f, 0.9f)
+        decor.springTo(DynamicAnimation.SCALE_Y, 1f, 500f, 0.9f)
+        decor.springTo(DynamicAnimation.TRANSLATION_Y, 0f, 500f, 0.92f)
+        glass.frost(delay = 60)
 
         if (oPrefs.showKeyboardOnAllApps) {
             searchBox.post {
@@ -1109,12 +1250,10 @@ class SidebarOverlayService : Service() {
             if (filtered.isEmpty()) {
                 grid.addView(TextView(this).apply {
                     text = if (query.isEmpty()) "" else "No results"
-                    setTextColor(labelColor)
+                    setTextColor(s.onSurfaceVariant)
                     gravity = Gravity.CENTER
                     setPadding(0, dp(40), 0, dp(40))
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                })
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
                 return
             }
             var row: LinearLayout? = null
@@ -1128,7 +1267,7 @@ class SidebarOverlayService : Service() {
                     grid.addView(row)
                 }
                 val (pkg, name, icon) = app
-                row?.addView(makeAppCell(pkg, name, icon, labelColor, true,
+                row?.addView(makeAppCell(pkg, name, icon, s, showLabel = true,
                     isHighlighted = query.isNotEmpty() && i == 0) {
                     hideAllAppsDrawer()
                     doLaunch(pkg)
@@ -1175,7 +1314,7 @@ class SidebarOverlayService : Service() {
                         catch (e: Exception) { Log.w(TAG, "No icon for $pkg", e); null }
                     }
                     Handler(Looper.getMainLooper()).post {
-                        if (allAppsView == null) return@post
+                        if (drawerWindow !== glass) return@post
                         appList.addAll(entries)
                         rebuildGrid(searchBox.text.toString())
                     }
@@ -1186,108 +1325,150 @@ class SidebarOverlayService : Service() {
         }
     }
 
-    private fun hideAllAppsDrawer() {
-        val drawer = allAppsView ?: return
-        allAppsView = null
+    private fun hideAllAppsDrawer(animate: Boolean = true) {
+        val glass = drawerWindow ?: return
+        drawerWindow = null
         showingDrawer = false
-        val dismiss = allAppsDismissOverlay
-        allAppsDismissOverlay = null
+        drawerBackdrop?.dismiss()
+        drawerBackdrop = null
         val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-        imm.hideSoftInputFromWindow(drawer.windowToken, 0)
+        imm.hideSoftInputFromWindow(glass.decor.windowToken, 0)
         handleView?.visibility = View.VISIBLE
         handleViewAlt?.visibility = View.VISIBLE
-        drawer.animate().withLayer().alpha(0f).scaleX(0.92f).scaleY(0.92f)
-            .setDuration(160).setInterpolator(AccelerateInterpolator(1.5f))
-            .withEndAction {
-                runCatching { wm.removeViewImmediate(drawer) }
-                dismiss?.let { runCatching { wm.removeViewImmediate(it) } }
-            }
-            .start()
+        if (animate) glass.close { scaleX(0.94f).scaleY(0.94f).translationY(dp(16).toFloat()) }
+        else glass.dismissNow()
     }
 
-    // ── Control tile helpers ──────────────────────────────────────────────────
+    // ── Control tiles ─────────────────────────────────────────────────────────
 
+    private enum class TileStyle { TOGGLE, ACTION }
+
+    /**
+     * Quick-settings style tile. Toggles fill with primary and morph from a rounded square
+     * to a pill when on; action tiles use the secondary container. Pressing squeezes the shape.
+     */
     private fun makeControlTile(
         label: String,
         getIcon: () -> String,
-        bgColor: Int, activeColor: Int,
+        s: M3Scheme,
         getActive: () -> Boolean,
         getSubtitle: () -> String,
-        swipeGd: GestureDetector? = null,
+        style: TileStyle = TileStyle.TOGGLE,
         onClick: () -> Unit
     ): LinearLayout {
+        val h = dp(64)
+        val bg = GradientDrawable()
         val tile = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(0, dp(60), 1f).apply {
+            background = bg
+            layoutParams = LinearLayout.LayoutParams(0, h, 1f).apply {
                 marginStart = dp(3); marginEnd = dp(3)
             }
             isClickable = true
             isFocusable = true
+            contentDescription = label
         }
 
-        val iconTv = TextView(this).apply {
-            textSize = 20f
+        val iconTv = iconText("", 20f, s.onSurface)
+        val labelTv = TextView(this).apply {
+            text = label
+            textSize = 10f
+            typeface = mediumTypeface
             gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            typeface = iconTypeface
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(4), dp(3), dp(4), 0)
         }
         val subtitleTv = TextView(this).apply {
             textSize = 9f
             gravity = Gravity.CENTER
-            setTextColor(Color.argb(180, 255, 255, 255))
             maxLines = 1
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(1) }
         }
 
-        fun update() {
-            tile.background = GradientDrawable().apply {
-                setColor(if (getActive()) activeColor else bgColor)
-                cornerRadius = dp(12).toFloat()
-            }
+        fun colorsFor(active: Boolean): Pair<Int, Int> = when {
+            style == TileStyle.ACTION -> s.secondaryContainer to s.onSecondaryContainer
+            active -> s.primary to s.onPrimary
+            else -> s.surfaceContainerHighest to s.onSurface
+        }
+        fun applyFg(c: Int) {
+            iconTv.setTextColor(c)
+            labelTv.setTextColor(c)
+            subtitleTv.setTextColor(withAlpha(c, 190))
+        }
+
+        var active = getActive()
+        var pressed = false
+        var shownColors = colorsFor(active)
+        var colorAnim: ValueAnimator? = null
+        bg.setColor(shownColors.first)
+        applyFg(shownColors.second)
+
+        fun targetRadius() = when {
+            pressed -> dp(12).toFloat()
+            active && style == TileStyle.TOGGLE -> h / 2f
+            else -> dp(20).toFloat()
+        }
+        bg.cornerRadius = targetRadius()
+        val radius = FloatSpring(targetRadius(), SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING) { bg.cornerRadius = it }
+
+        fun refresh() {
+            active = getActive()
             iconTv.text = getIcon()
             subtitleTv.text = getSubtitle()
+            subtitleTv.visibility = if (subtitleTv.text.isNullOrEmpty()) View.GONE else View.VISIBLE
+            radius.animateTo(targetRadius())
+            val target = colorsFor(active)
+            if (target == shownColors) return
+            val from = shownColors
+            colorAnim?.cancel()
+            colorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 220
+                interpolator = emphasizedDecelerate
+                addUpdateListener { a ->
+                    val t = a.animatedFraction
+                    shownColors = ColorUtils.blendARGB(from.first, target.first, t) to
+                            ColorUtils.blendARGB(from.second, target.second, t)
+                    bg.setColor(shownColors.first)
+                    applyFg(shownColors.second)
+                }
+                start()
+            }
         }
-        update()
+        refresh()
 
         tile.setOnClickListener {
             onClick()
-            Handler(Looper.getMainLooper()).postDelayed({ update() }, 120)
+            Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 150)
         }
         var touchDownX = 0f; var touchDownY = 0f; var touchSwiped = false
-        tile.setOnTouchListener { _, event ->
-            swipeGd?.onTouchEvent(event)
+        tile.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     touchDownX = event.rawX; touchDownY = event.rawY; touchSwiped = false
-                    tile.animate().withLayer().scaleX(0.90f).scaleY(0.90f).setDuration(80).start()
+                    pressed = true
+                    radius.animateTo(targetRadius())
+                    v.springTo(DynamicAnimation.SCALE_X, 0.94f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                    v.springTo(DynamicAnimation.SCALE_Y, 0.94f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
                 }
                 MotionEvent.ACTION_MOVE ->
                     if (Math.abs(event.rawX - touchDownX) > dp(8) ||
                         Math.abs(event.rawY - touchDownY) > dp(8)) touchSwiped = true
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
-                    tile.animate().withLayer().scaleX(1f).scaleY(1f).setDuration(160)
-                        .setInterpolator(OvershootInterpolator(1.8f)).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    pressed = false
+                    radius.animateTo(targetRadius())
+                    v.springTo(DynamicAnimation.SCALE_X, 1f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                    v.springTo(DynamicAnimation.SCALE_Y, 1f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                }
             }
             touchSwiped
         }
 
         tile.addView(iconTv)
-        tile.addView(TextView(this).apply {
-            text = label
-            textSize = 10f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            maxLines = 1
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(2) }
-        })
-        tile.addView(subtitleTv)
+        tile.addView(labelTv, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        tile.addView(subtitleTv, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         return tile
     }
 
@@ -1432,6 +1613,7 @@ class SidebarOverlayService : Service() {
 
     private fun setBrightness(value: Int) {
         if (!Settings.System.canWrite(this)) {
+            hidePanel()
             startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS,
                 Uri.parse("package:$packageName"))
                 .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
@@ -1442,176 +1624,136 @@ class SidebarOverlayService : Service() {
         Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, value)
     }
 
-    // ── Brightness slider (QS pill style) ────────────────────────────────────
+    // ── Pill slider (brightness, volume streams) ─────────────────────────────
 
-    private fun makeBrightnessSliderRow(
-        icon: String,
-        initial: Int, min: Int, max: Int,
-        iconColor: Int,
-        fillColor: Int,
-        bgColor: Int,
-        onChange: (Int) -> Unit
-    ): View {
-        val h = dp(44)
-        val r = h / 2f
-
-        val bgGd = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE; cornerRadius = r; setColor(bgColor)
-        }
-        val fillGd = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE; cornerRadius = r; setColor(fillColor)
-        }
-
-        val container = FrameLayout(this).apply {
-            background = bgGd
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h)
-        }
-
-        val fillView = View(this).apply {
-            background = fillGd
-            layoutParams = FrameLayout.LayoutParams(h, FrameLayout.LayoutParams.MATCH_PARENT)
-        }
-        container.addView(fillView)
-
-        container.addView(TextView(this).apply {
-            text = icon
-            textSize = 18f
-            gravity = Gravity.CENTER
-            setTextColor(iconColor)
+    /**
+     * Thick pill slider in the quick-settings style, drawn by a single view: track, rounded
+     * fill and icon. Dragging only invalidates (no relayout), and the fill glides to taps.
+     */
+    private inner class PillSlider(
+        private val vertical: Boolean,
+        private val icon: String,
+        initial: Int,
+        private val min: Int,
+        private val max: Int,
+        s: M3Scheme,
+        private val onChange: (Int) -> Unit
+    ) : View(this@SidebarOverlayService) {
+        private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = s.surfaceContainerHighest }
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = s.primary }
+        private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = s.onPrimary
             typeface = iconTypeface
-            layoutParams = FrameLayout.LayoutParams(h, FrameLayout.LayoutParams.MATCH_PARENT)
-        })
+            textAlign = Paint.Align.CENTER
+            textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 18f, resources.displayMetrics)
+        }
+        private val rect = RectF()
+        private var current = initial
+        private var fraction = fractionOf(initial)
+        private val spring = FloatSpring(fraction, 900f, 0.9f) { fraction = it; invalidate() }
 
-        fun updateFill(progress: Int) {
-            val w = container.width.takeIf { it > 0 } ?: return
-            val fraction = (progress - min).toFloat() / (max - min)
-            val fillW = (fraction * w).toInt().coerceAtLeast(h)
-            (fillView.layoutParams as FrameLayout.LayoutParams).width = fillW
-            fillView.requestLayout()
+        private fun fractionOf(v: Int) = ((v - min).toFloat() / (max - min).coerceAtLeast(1)).coerceIn(0f, 1f)
+
+        override fun onDraw(canvas: Canvas) {
+            val w = width.toFloat()
+            val h = height.toFloat()
+            val thickness = if (vertical) w else h
+            val r = thickness / 2f
+            val length = if (vertical) h else w
+
+            rect.set(0f, 0f, w, h)
+            canvas.drawRoundRect(rect, r, r, trackPaint)
+
+            val fill = thickness + fraction.coerceIn(0f, 1f) * (length - thickness)
+            if (vertical) rect.set(0f, h - fill, w, h) else rect.set(0f, 0f, fill, h)
+            canvas.drawRoundRect(rect, r, r, fillPaint)
+
+            val cx = if (vertical) w / 2f else r
+            val cy = if (vertical) h - r else h / 2f
+            val fm = iconPaint.fontMetrics
+            canvas.drawText(icon, cx, cy - (fm.ascent + fm.descent) / 2f, iconPaint)
         }
 
-        container.post { updateFill(initial) }
-
-        container.setOnTouchListener { v, event ->
-            when (event.actionMasked) {
+        @SuppressLint("ClickableViewAccessibility")
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            val thickness = (if (vertical) width else height).toFloat()
+            val length = (if (vertical) height else width).toFloat()
+            if (length <= thickness) return false
+            val pos = if (vertical) length - e.y else e.x
+            val frac = ((pos - thickness / 2f) / (length - thickness)).coerceIn(0f, 1f)
+            val value = (min + frac * (max - min)).roundToInt()
+            return when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                    val frac = (event.x / v.width).coerceIn(0f, 1f)
-                    val prog = (min + frac * (max - min)).toInt()
-                    updateFill(prog)
-                    onChange(prog)
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    if (value != current) {
+                        current = value
+                        onChange(value)
+                    }
+                    // While dragging the fill tracks the finger smoothly, not in volume steps.
+                    spring.animateTo(if (e.actionMasked == MotionEvent.ACTION_MOVE) frac else fractionOf(value))
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> true
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    spring.animateTo(fractionOf(current))
+                    true
+                }
                 else -> false
             }
         }
-
-        return container
-    }
-
-    // ── Slider row ────────────────────────────────────────────────────────────
-
-    private fun makeSliderRow(
-        icon: String,
-        initial: Int, min: Int, max: Int,
-        iconColor: Int,
-        accentColor: Int,
-        trackBgColor: Int,
-        onChange: (Int) -> Unit
-    ): LinearLayout {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-        }
-        row.addView(TextView(this).apply {
-            text = icon
-            textSize = 18f
-            gravity = Gravity.CENTER
-            setTextColor(iconColor)
-            typeface = iconTypeface
-            layoutParams = LinearLayout.LayoutParams(dp(28), LinearLayout.LayoutParams.WRAP_CONTENT)
-        })
-        val trackH = dp(10)
-        val r = trackH / 2f
-        val bgGd = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE; cornerRadius = r; setColor(trackBgColor)
-            setSize(-1, trackH)
-        }
-        val fillGd = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE; cornerRadius = r; setColor(accentColor)
-            setSize(-1, trackH)
-        }
-        val trackDrawable = LayerDrawable(arrayOf(bgGd, ClipDrawable(fillGd, Gravity.START, ClipDrawable.HORIZONTAL))).apply {
-            setId(0, android.R.id.background)
-            setId(1, android.R.id.progress)
-        }
-        val seekBar = SeekBar(this).apply {
-            this.max = max - min
-            progress = (initial - min).coerceIn(0, max - min)
-            progressDrawable = trackDrawable
-            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            splitTrack = false
-            layoutParams = LinearLayout.LayoutParams(0, dp(36), 1f).apply {
-                marginStart = dp(6)
-            }
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                    if (fromUser) onChange(progress + min)
-                }
-                override fun onStartTrackingTouch(sb: SeekBar) {}
-                override fun onStopTrackingTouch(sb: SeekBar) {}
-            })
-        }
-        row.addView(seekBar)
-        return row
     }
 
     // ── App cell ──────────────────────────────────────────────────────────────
 
     private fun makeAppCell(
-        pkg: String, name: String, icon: Drawable,
-        labelColor: Int = Color.WHITE, showLabel: Boolean = true,
+        pkg: String, name: String, icon: Drawable, s: M3Scheme,
+        showLabel: Boolean = true,
         isHighlighted: Boolean = false,
+        circular: Boolean = false,
         onClick: () -> Unit = { launch(pkg) }
     ): View {
         val cell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(4), dp(10), dp(4), dp(10))
+            setPadding(dp(4), dp(8), dp(4), dp(8))
             isClickable = true
             isFocusable = true
+            contentDescription = name
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            if (isHighlighted) {
-                background = GradientDrawable().apply {
-                    setColor(Color.TRANSPARENT)
-                    cornerRadius = dp(12).toFloat()
-                    setStroke(dp(2), panelOutlineColor)
-                }
-            }
+            if (isHighlighted) background = surfaceBackground(s.primaryContainer, 20)
             setOnClickListener { onClick() }
             setOnLongClickListener { showAppContextMenu(pkg, name, it); true }
-            setOnTouchListener { _, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN ->
-                        animate().withLayer().scaleX(0.85f).scaleY(0.85f).setDuration(80).start()
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
-                        animate().withLayer().scaleX(1f).scaleY(1f).setDuration(160)
-                            .setInterpolator(OvershootInterpolator(2f)).start()
+        }
+        val iv = ImageView(this).apply {
+            setImageDrawable(icon)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            if (circular) {
+                clipToOutline = true
+                outlineProvider = object : ViewOutlineProvider() {
+                    override fun getOutline(view: View, outline: Outline) {
+                        outline.setOval(0, 0, view.width, view.height)
+                    }
                 }
-                false
             }
         }
-        cell.addView(ImageView(this).apply {
-            setImageDrawable(icon)
-            val size = dp(48)
-            layoutParams = LinearLayout.LayoutParams(size, size)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-        })
+        cell.addView(iv, LinearLayout.LayoutParams(dp(48), dp(48)))
+        // The icon (not the label) dips on press and bounces back on release.
+        cell.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    iv.springTo(DynamicAnimation.SCALE_X, 0.86f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                    iv.springTo(DynamicAnimation.SCALE_Y, 0.86f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    iv.springTo(DynamicAnimation.SCALE_X, 1f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                    iv.springTo(DynamicAnimation.SCALE_Y, 1f, SPATIAL_FAST_STIFFNESS, SPATIAL_FAST_DAMPING)
+                }
+            }
+            false
+        }
         if (showLabel) {
             cell.addView(TextView(this).apply {
                 text = name
-                setTextColor(labelColor)
+                setTextColor(if (isHighlighted) s.onPrimaryContainer else s.onSurface)
                 textSize = 11f
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
@@ -1774,6 +1916,7 @@ class SidebarOverlayService : Service() {
         val appIcon: Drawable? = try { packageManager.getApplicationIcon(pkg) } catch (_: Exception) { null }
         val titleH  = dp(44)
         val resizeSz = dp(32)
+        val s = scheme()
 
         // Title bar
         val bar = LinearLayout(this).apply {
@@ -1782,8 +1925,8 @@ class SidebarOverlayService : Service() {
             setPadding(dp(10), 0, dp(6), 0)
             elevation = dp(8).toFloat()
             background = GradientDrawable().apply {
-                setColor(Color.argb(220, 28, 27, 31))
-                cornerRadii = floatArrayOf(dp(10).toFloat(), dp(10).toFloat(), dp(10).toFloat(), dp(10).toFloat(), 0f, 0f, 0f, 0f)
+                setColor(withAlpha(s.surfaceContainerHigh, 240))
+                cornerRadii = floatArrayOf(dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat(), 0f, 0f, 0f, 0f)
             }
         }
         appIcon?.let {
@@ -1795,13 +1938,13 @@ class SidebarOverlayService : Service() {
         }
         bar.addView(TextView(this).apply {
             text = appName; textSize = 13f
-            setTextColor(Color.argb(220, 230, 224, 233))
+            typeface = mediumTypeface
+            setTextColor(s.onSurface)
             maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
-        bar.addView(TextView(this).apply {
-            text = "⛶"; textSize = 14f; gravity = Gravity.CENTER
-            setTextColor(Color.argb(180, 230, 224, 233))
+        bar.addView(iconText("\uE5D0", 18f, s.onSurfaceVariant).apply {
+            contentDescription = "Maximize"
             layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
             setOnClickListener {
                 val component = freeformComponents[taskId]
@@ -1815,9 +1958,8 @@ class SidebarOverlayService : Service() {
                 }.start()
             }
         })
-        bar.addView(TextView(this).apply {
-            text = "✕"; textSize = 15f; gravity = Gravity.CENTER
-            setTextColor(Color.argb(200, 230, 224, 233))
+        bar.addView(iconText("\uE5CD", 18f, s.onSurfaceVariant).apply {
+            contentDescription = "Close"
             layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
             setOnClickListener {
                 val rootTaskId = freeformRootTasks[taskId] ?: taskId
@@ -1878,7 +2020,7 @@ class SidebarOverlayService : Service() {
         // Resize handle
         val rh = View(this).apply {
             elevation = dp(8).toFloat()
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.argb(160, 80, 80, 110)) }
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(withAlpha(s.primary, 200)) }
         }
         val rp = WindowManager.LayoutParams(
             resizeSz, resizeSz, overlayType(),
@@ -1976,77 +2118,87 @@ class SidebarOverlayService : Service() {
         }.start()
     }
 
+    private var menuWindow: GlassWindow? = null
+    private var menuBackdrop: Backdrop? = null
+
     private fun showAppContextMenu(pkg: String, name: String, anchor: View) {
         hideContextMenu()
-        val prefs = pillPrefs()
-        val light = prefs.theme == "light"
-        val panelBg = resolvePanelBg(prefs.panelColor, 252, light)
-        val effectiveLight = if (prefs.panelColor.isNotEmpty()) {
-            val hsv = FloatArray(3); Color.colorToHSV(panelBg, hsv); hsv[2] > 0.5f
-        } else light
-        val tileBg = if (effectiveLight) Color.argb(130, 115, 105, 130) else Color.argb(130, 55, 52, 62)
-        val labelColor = if (effectiveLight) Color.argb(140, 28, 27, 31) else Color.argb(140, 230, 225, 229)
+        val s = scheme()
+        val oPrefs = overlayPrefs()
 
         val loc = IntArray(2)
         anchor.getLocationOnScreen(loc)
         val dm = resources.displayMetrics
-        val menuW = dp(180)
-        var mx = loc[0] + anchor.width / 2 - menuW / 2
-        var my = loc[1] + anchor.height / 2
-        mx = mx.coerceIn(dp(8), dm.widthPixels - menuW - dp(8))
-        my = my.coerceIn(dp(8), dm.heightPixels - dp(140))
+        val menuW = dp(200)
+        val mx = (loc[0] + anchor.width / 2 - menuW / 2).coerceIn(dp(8), dm.widthPixels - menuW - dp(8))
+        val my = (loc[1] + anchor.height / 2).coerceIn(dp(8), dm.heightPixels - dp(160))
 
         val menu = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply { setColor(panelBg); cornerRadius = dp(16).toFloat() }
-            elevation = dp(10).toFloat()
-            setPadding(dp(4), dp(4), dp(4), dp(4))
+            setPadding(0, dp(8), 0, dp(8))
         }
         menu.addView(TextView(this).apply {
             text = name
             textSize = 12f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(Color.argb(160, Color.red(labelColor), Color.green(labelColor), Color.blue(labelColor)))
-            setPadding(dp(14), dp(10), dp(14), dp(6))
+            typeface = mediumTypeface
+            setTextColor(s.onSurfaceVariant)
+            setPadding(dp(16), dp(4), dp(16), dp(8))
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         })
-        menu.addView(View(this).apply {
-            setBackgroundColor(Color.argb(30, 0, 0, 0))
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
-                setMargins(dp(8), dp(2), dp(8), dp(2))
-            }
-        })
-        fun item(label: String, action: () -> Unit) = TextView(this).apply {
-            text = label
-            textSize = 14f
-            setTextColor(labelColor)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            isClickable = true; isFocusable = true
-            background = GradientDrawable().apply { setColor(Color.TRANSPARENT); cornerRadius = dp(12).toFloat() }
+        fun item(icon: String, label: String, action: () -> Unit) = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            isClickable = true
+            isFocusable = true
+            background = android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(withAlpha(s.onSurface, 30)), null,
+                ColorDrawable(Color.WHITE)
+            )
+            addView(iconText(icon, 20f, s.onSurfaceVariant), LinearLayout.LayoutParams(dp(24), dp(24)))
+            addView(TextView(this@SidebarOverlayService).apply {
+                text = label
+                textSize = 14f
+                setTextColor(s.onSurface)
+                setPadding(dp(12), 0, 0, 0)
+            })
             setOnClickListener { hideContextMenu(); action() }
         }
-        menu.addView(item("Open") { doLaunch(pkg) })
+        menu.addView(item("", "Open") {
+            if (showingDrawer) hideAllAppsDrawer()
+            launch(pkg)
+        })
+        menu.addView(item("", "App info") {
+            if (showingDrawer) hideAllAppsDrawer()
+            hidePanel()
+            runCatching {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+        })
 
-        val container = FrameLayout(this).apply {
-            setOnClickListener { hideContextMenu() }
-            addView(menu, FrameLayout.LayoutParams(menuW, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                leftMargin = mx; topMargin = my
-            })
-        }
-        wm.addView(container, WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
-            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ))
-        contextMenuView = container
-        menu.alpha = 0f; menu.scaleX = 0.88f; menu.scaleY = 0.88f
-        menu.animate().withLayer().alpha(1f).scaleX(1f).scaleY(1f)
-            .setDuration(180).setInterpolator(OvershootInterpolator(1.5f)).start()
+        menuBackdrop = Backdrop(0f, 0) { hideContextMenu() }
+        val glass = GlassWindow(menu, menuW, WindowManager.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START, mx, my, dp(16).toFloat(), s.surfaceContainer, blurPx(oPrefs))
+        menuWindow = glass
+        val decor = glass.decor
+        decor.pivotX = menuW / 2f
+        decor.pivotY = 0f
+        decor.alpha = 0f
+        decor.scaleX = 0.92f
+        decor.scaleY = 0.7f
+        decor.animate().alpha(1f).setDuration(120).setInterpolator(emphasizedDecelerate).start()
+        decor.springTo(DynamicAnimation.SCALE_X, 1f, 700f, 0.9f)
+        decor.springTo(DynamicAnimation.SCALE_Y, 1f, 700f, 0.9f)
+        glass.frost()
     }
 
     private fun hideContextMenu() {
-        contextMenuView?.let { runCatching { wm.removeView(it) } }
-        contextMenuView = null
+        menuWindow?.dismissNow()
+        menuWindow = null
+        menuBackdrop?.let { runCatching { it.dialog.dismiss() } }
+        menuBackdrop = null
     }
 
     private fun prefetchAppData() {
@@ -2137,25 +2289,8 @@ class SidebarOverlayService : Service() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private inner class PullTabDrawable(
-        private val highlighted: Boolean,
-        private val theme: String = "dark",
-        private val handleColor: String = ""
-    ) : Drawable() {
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (handleColor.isNotEmpty()) {
-                runCatching {
-                    val base = Color.parseColor(handleColor)
-                    val alpha = if (highlighted) 230 else 210
-                    Color.argb(alpha, Color.red(base), Color.green(base), Color.blue(base))
-                }.getOrElse { if (highlighted) Color.argb(230, 100, 100, 100) else Color.argb(210, 100, 100, 100) }
-            } else when {
-                highlighted && theme == "light" -> Color.argb(230, 160, 160, 160)
-                highlighted                     -> Color.argb(230, 80, 80, 80)
-                theme == "light"                -> Color.argb(210, 255, 251, 254)
-                else                            -> Color.argb(210, 28, 27, 31)
-            }
-        }
+    private class PullTabDrawable(color: Int) : Drawable() {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color }
         private val rect = RectF()
         override fun draw(canvas: Canvas) {
             rect.set(bounds)
@@ -2170,5 +2305,14 @@ class SidebarOverlayService : Service() {
     companion object {
         private const val TAG = "SidebarOverlayService"
         private const val SHIZUKU_PERM_CODE = 1001
+
+        // Spring tokens, close to critically damped so nothing visibly bounces.
+        private const val SPATIAL_STIFFNESS = 500f
+        private const val SPATIAL_DAMPING = 0.9f
+        private const val SPATIAL_FAST_STIFFNESS = 900f
+        private const val SPATIAL_FAST_DAMPING = 0.78f
+
+        /** Surface alpha once frosted: enough tint to read, enough glass to see the blur. */
+        private const val FROST_ALPHA = 165
     }
 }

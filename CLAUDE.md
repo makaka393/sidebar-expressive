@@ -30,8 +30,8 @@ Release signing reads `SIDEBAR_STORE_PASSWORD` / `SIDEBAR_KEY_PASSWORD` from Gra
 
 ### Two halves of the app
 
-1. **`app/index.tsx`** — the in-app settings screen (Expo Router, single screen, four swipeable tabs: Handle, Behavior, Control, Apps). All settings are local React state (`pill: PillSettings`, `overlay: OverlaySettings`) synced to native SharedPreferences via `modules/sidebar.ts`. Tab switching is a custom `Animated`/`PanResponder` slide, not `@react-navigation` tabs.
-2. **`android/app/src/main/java/com/alkisstam/sidebar/SidebarOverlayService.kt`** — a foreground `Service` that owns the actual on-screen overlay. It adds *multiple independent* `WindowManager` windows (handle pill, panel, control-tiles popup, volume/brightness popup, all-apps drawer, dismiss-catcher), each built with manual `LinearLayout`/`FrameLayout`/`TextView` view trees — no XML layouts, no Compose. This file is large (~1800 lines); when adding a control tile or panel element, find the relevant `wm.addView(...)` block rather than assuming a single root layout.
+1. **`app/index.tsx`** — the in-app settings screen (Expo Router, single screen, four swipeable tabs: Look (id `handle`), Behavior, Controls (id `control`), Apps). It owns all settings as React state (`pill: PillSettings`, `overlay: OverlaySettings`) synced to native SharedPreferences via `modules/sidebar.ts`, and renders one tab at a time from `src/tabs/*`. Tab switching is a keyed Reanimated entering animation plus an RNGH pan for swipes, not `@react-navigation` tabs. Reusable M3 Expressive controls (switch, slider, button group, segmented list, chips, morphing pressable, nav bar) live in `src/components/`.
+2. **`android/app/src/main/java/com/alkisstam/sidebar/SidebarOverlayService.kt`** — a foreground `Service` that owns the actual on-screen overlay. It adds *multiple independent* overlay windows (handle pill, panel, control-tiles popup, volume/brightness popup, all-apps drawer, dismiss-catcher), each built with manual `LinearLayout`/`FrameLayout`/`TextView` view trees — no XML layouts, no Compose. This file is large (~1800 lines); when adding a control tile or panel element, find the relevant `GlassWindow(...)` / `wm.addView(...)` call rather than assuming a single root layout.
 
 These two halves only communicate through `modules/sidebar.ts` (the JS-side bridge) and `SidebarModule.kt` (the native module) reading/writing `SharedPreferences` (`SidebarPrefs.kt` holds all the key constants) — there's no live RN↔overlay channel; the overlay service re-reads prefs and rebuilds its views.
 
@@ -39,11 +39,21 @@ These two halves only communicate through `modules/sidebar.ts` (the JS-side brid
 
 - `OverlaySettings` / `PillSettings` (TypeScript interfaces in `modules/sidebar.ts`) are the single source of truth for shape. Any new toggle needs: a field in the interface, a default in `DEFAULT_OVERLAY`/`DEFAULT_PILL` (`app/index.tsx`), a `Prefs.*` key + read/write in `SidebarModule.kt`'s `getOverlaySettings`/`saveOverlaySettings`, and a matching field in `SidebarOverlayService.kt`'s settings data class plus the code path that acts on it.
 - Permission checks (overlay, DND, write-settings, usage-access) follow one repeated pattern: `hasXPermission`/`requestXPermission` native methods, mirrored in `modules/sidebar.ts`, polled on mount and again on app-resume (`AppState` listener in `app/index.tsx`), rendered as a row with either a checkmark or a "Grant" button that deep-links to the relevant system Settings screen.
-- Control tiles (`CONTROL_TILES` in `app/index.tsx`) are reorderable; order is persisted as an array of string ids (`controlTilesOrder`) and consumed by `SidebarOverlayService.kt`, which silently skips ids whose `show*` flag is off — so JS-side reordering logic only needs to keep disabled ids somewhere in the list, not filter them out.
+- Control tiles (`CONTROL_TILES` in `src/tabs/ControlTab.tsx`) are reorderable; order is persisted as an array of string ids (`controlTilesOrder`) and consumed by `SidebarOverlayService.kt`, which silently skips ids whose `show*` flag is off — so JS-side reordering logic only needs to keep disabled ids somewhere in the list, not filter them out.
 
 ### Theming
 
-`src/theme.ts` exports `makeColors(scheme)` and `makeStyles(colors)` (Material 3-flavored palette, light/dark). `src/ThemeContext.tsx` provides the active scheme app-wide. Always derive new styles from the existing `colors`/`s` objects passed into screens rather than hardcoding hex values.
+Both halves paint with the same M3 color roles (`ROLE_NAMES` in `src/theme.ts` = `SidebarColors.ROLE_NAMES` in Kotlin — keep them in sync).
+
+- **System colors** (default): `SidebarColors.system()` builds tonal-spot roles from the Android 12+ wallpaper palettes (`system_accent1_*` etc.). The overlay reads them live; the settings UI gets them through `Sidebar.getSystemColors()`.
+- **Custom color**: `src/theme.ts` generates light/dark schemes from the seed with `@material/material-color-utilities` (`schemeFromSeed`). The settings screen saves the result as JSON (`customScheme` → `Prefs.CUSTOM_SCHEME`), which the overlay parses — Kotlin never generates schemes itself.
+- `app/_layout.tsx` holds theme state (`themeChoice`, `colorSource`, `seedColor`, `paletteStyle`) in `ThemeContext` and exposes the active `colors`. Use `useAppTheme().colors` plus `type`/`shape` from `src/theme.ts`; don't hardcode hex values.
+- Motion tokens: `src/motion.ts` (Reanimated springs) and the `SPATIAL_*` constants / `springTo` helper in `SidebarOverlayService.kt` (androidx.dynamicanimation). Springs are kept near critical damping (no visible bounce); color/opacity changes never overshoot.
+- Panels (sidebar column, Tools, Volume, All Apps, long-press menu) are `GlassWindow`s: Dialog-backed `TYPE_APPLICATION_OVERLAY` windows (theme `SidebarSurface`), because only a Dialog/PhoneWindow can use `Window.setBackgroundBlurRadius`. With "Background blur" on they frost (translucent surface + window background blur); the full-screen `Backdrop` dialog under a panel only catches taps (and dims for All Apps) — it never blurs the apps behind; animate `GlassWindow.decor`, not the content. Blur is skipped when `WindowManager.isCrossWindowBlurEnabled` is false. The handle and freeform title bars are still plain `WindowManager.addView` views.
+
+### Web preview
+
+`modules/sidebar.web.ts` is an in-memory stand-in for the native module, so `npx expo start --web` renders the settings UI in a browser for layout/animation checks. It never runs on Android.
 
 ### Versioning
 

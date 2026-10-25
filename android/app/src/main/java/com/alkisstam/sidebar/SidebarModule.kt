@@ -3,6 +3,7 @@ package com.alkisstam.sidebar
 import android.app.AppOpsManager
 import rikka.shizuku.Shizuku
 import android.app.NotificationManager
+import android.app.WallpaperManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -16,6 +17,7 @@ import android.provider.Settings
 import android.util.Base64
 import android.util.Log
 import android.util.LruCache
+import android.view.WindowManager
 import com.facebook.react.bridge.*
 import org.json.JSONArray
 import java.io.ByteArrayOutputStream
@@ -139,7 +141,10 @@ class SidebarModule(private val reactContext: ReactApplicationContext) :
         if (settings.hasKey("opacity")) prefs.putFloat(Prefs.PILL_OPACITY, settings.getDouble("opacity").toFloat())
         if (settings.hasKey("theme")) prefs.putString(Prefs.PILL_THEME, settings.getString("theme"))
         if (settings.hasKey("themeChoice")) prefs.putString(Prefs.THEME_CHOICE, settings.getString("themeChoice"))
-        if (settings.hasKey("panelColor")) prefs.putString(Prefs.PANEL_COLOR, settings.getString("panelColor") ?: "")
+        if (settings.hasKey("colorSource")) prefs.putString(Prefs.COLOR_SOURCE, settings.getString("colorSource"))
+        if (settings.hasKey("seedColor")) prefs.putString(Prefs.SEED_COLOR, settings.getString("seedColor"))
+        if (settings.hasKey("paletteStyle")) prefs.putString(Prefs.PALETTE_STYLE, settings.getString("paletteStyle"))
+        if (settings.hasKey("customScheme")) prefs.putString(Prefs.CUSTOM_SCHEME, settings.getString("customScheme"))
         prefs.apply()
         val serviceEnabled = reactContext.getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE)
             .getBoolean(Prefs.SERVICE_ENABLED, false)
@@ -167,7 +172,9 @@ class SidebarModule(private val reactContext: ReactApplicationContext) :
         val savedThemeChoice = prefs.getString(Prefs.THEME_CHOICE, null)
             ?: prefs.getString(Prefs.PILL_THEME, null) ?: "system"
         map.putString("themeChoice", savedThemeChoice)
-        map.putString("panelColor", prefs.getString(Prefs.PANEL_COLOR, "") ?: "")
+        map.putString("colorSource", prefs.getString(Prefs.COLOR_SOURCE, "system") ?: "system")
+        map.putString("seedColor", prefs.getString(Prefs.SEED_COLOR, "#6750A4") ?: "#6750A4")
+        map.putString("paletteStyle", prefs.getString(Prefs.PALETTE_STYLE, "tonal") ?: "tonal")
         promise.resolve(map)
     }
 
@@ -202,6 +209,8 @@ class SidebarModule(private val reactContext: ReactApplicationContext) :
         map.putString("controlTilesOrder", prefs.getString(Prefs.CONTROL_TILES_ORDER,
             "[\"torch\",\"rotate\",\"brightness\",\"ringer\",\"share\",\"power\",\"qr\",\"dnd\"]"))
         map.putBoolean("freeformWindows", prefs.getBoolean(Prefs.FREEFORM_WINDOWS, false))
+        map.putBoolean("blurBehind", prefs.getBoolean(Prefs.BLUR_BEHIND, false))
+        map.putInt("blurRadius", prefs.getInt(Prefs.BLUR_RADIUS, 20))
         promise.resolve(map)
     }
 
@@ -234,6 +243,8 @@ class SidebarModule(private val reactContext: ReactApplicationContext) :
         if (settings.hasKey("showVolume")) prefs.putBoolean(Prefs.SHOW_VOLUME, settings.getBoolean("showVolume"))
         if (settings.hasKey("controlTilesOrder")) prefs.putString(Prefs.CONTROL_TILES_ORDER, settings.getString("controlTilesOrder"))
         if (settings.hasKey("freeformWindows")) prefs.putBoolean(Prefs.FREEFORM_WINDOWS, settings.getBoolean("freeformWindows"))
+        if (settings.hasKey("blurBehind")) prefs.putBoolean(Prefs.BLUR_BEHIND, settings.getBoolean("blurBehind"))
+        if (settings.hasKey("blurRadius")) prefs.putInt(Prefs.BLUR_RADIUS, settings.getInt("blurRadius"))
         prefs.apply()
         val serviceEnabled = reactContext.getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE)
             .getBoolean(Prefs.SERVICE_ENABLED, false)
@@ -246,6 +257,52 @@ class SidebarModule(private val reactContext: ReactApplicationContext) :
             }
         }
         promise.resolve(null)
+    }
+
+    /** Wallpaper-derived M3 schemes `{light, dark}` as `#RRGGBB` maps, or null below Android 12. */
+    @ReactMethod
+    fun getSystemColors(promise: Promise) {
+        val light = SidebarColors.system(reactContext, false)
+        val dark = SidebarColors.system(reactContext, true)
+        if (light == null || dark == null) {
+            promise.resolve(null)
+            return
+        }
+        fun toMap(roles: Map<String, Int>) = WritableNativeMap().apply {
+            for ((name, hex) in SidebarColors.toHex(roles)) putString(name, hex)
+        }
+        val result = WritableNativeMap()
+        result.putMap("light", toMap(light))
+        result.putMap("dark", toMap(dark))
+        promise.resolve(result)
+    }
+
+    /** Up to three dominant wallpaper colors as `#RRGGBB` (Android 8.1+), used to suggest themes. */
+    @ReactMethod
+    fun getWallpaperColors(promise: Promise) {
+        val result = WritableNativeArray()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            try {
+                val colors = WallpaperManager.getInstance(reactContext)
+                    .getWallpaperColors(WallpaperManager.FLAG_SYSTEM)
+                listOfNotNull(colors?.primaryColor, colors?.secondaryColor, colors?.tertiaryColor)
+                    .forEach { result.pushString(String.format("#%06X", 0xFFFFFF and it.toArgb())) }
+            } catch (e: Exception) {
+                Log.w(TAG, "getWallpaperColors failed", e)
+            }
+        }
+        promise.resolve(result)
+    }
+
+    /** True when cross-window blur is available right now (Android 12+, not disabled by battery saver). */
+    @ReactMethod
+    fun isBlurSupported(promise: Promise) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val wm = reactContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            promise.resolve(wm.isCrossWindowBlurEnabled)
+        } else {
+            promise.resolve(false)
+        }
     }
 
     @ReactMethod

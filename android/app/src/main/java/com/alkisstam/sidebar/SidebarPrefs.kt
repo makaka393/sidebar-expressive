@@ -11,7 +11,10 @@ internal object Prefs {
     const val PILL_OPACITY = "pill_opacity"
     const val PILL_THEME = "pill_theme"
     const val THEME_CHOICE = "theme_choice"
-    const val PANEL_COLOR = "panel_color"
+    const val COLOR_SOURCE = "color_source"
+    const val SEED_COLOR = "seed_color"
+    const val PALETTE_STYLE = "palette_style"
+    const val CUSTOM_SCHEME = "custom_scheme"
     const val AUTO_HIDE_FULLSCREEN = "auto_hide_fullscreen"
     const val SHOW_LABELS = "show_labels"
     const val VIBRATION = "vibration"
@@ -39,4 +42,6 @@ internal object Prefs {
     const val SHOW_VOLUME         = "show_volume"
     const val CONTROL_TILES_ORDER = "control_tiles_order"
     const val FREEFORM_WINDOWS   = "freeform_windows"
+    const val BLUR_BEHIND        = "blur_behind"
+    const val BLUR_RADIUS        = "blur_radius"
 }

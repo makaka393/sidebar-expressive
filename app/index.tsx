@@ -1,59 +1,48 @@
 import { Ionicons } from "@expo/vector-icons";
-import { Image } from "expo-image";
-import { Stack } from "expo-router";
+import * as SplashScreen from "expo-splash-screen";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  ActivityIndicator,
-  Alert,
-  Animated,
-  AppState,
-  AppStateStatus,
-  Easing,
-  FlatList,
-  Linking,
-  PanResponder,
-  Pressable,
-  ScrollView,
-  Switch,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
-import DraggableFlatList, {
-  RenderItemParams,
-  ScaleDecorator,
-} from "react-native-draggable-flatlist";
-import ColorPicker, { HueCircular, Panel1 } from "reanimated-color-picker";
+import { Alert, AppState, AppStateStatus, Text, View } from "react-native";
+import { Gesture, GestureDetector, ScrollView } from "react-native-gesture-handler";
+import Animated, {
+  EntryExitAnimationFunction,
+  FadeIn,
+  FadeOut,
+  interpolateColor,
+  LayoutAnimationConfig,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Sidebar, { InstalledApp, OverlaySettings, PillSettings } from "../modules/sidebar";
-import { SliderRow } from "../src/components/SliderRow";
-import { makeColors, makeStyles } from "../src/theme";
+import { Button, MorphPressable } from "../src/components/Expressive";
+import { M3Switch } from "../src/components/M3Switch";
+import { NavBar, NavItem } from "../src/components/NavBar";
+import { emphasizedDecelerate, Springs } from "../src/motion";
+import { AppsTab, FavItem } from "../src/tabs/AppsTab";
+import { BehaviorTab } from "../src/tabs/BehaviorTab";
+import { ControlTab } from "../src/tabs/ControlTab";
+import { LookTab } from "../src/tabs/LookTab";
+import { DEFAULT_SEED, type } from "../src/theme";
 import { useAppTheme } from "../src/ThemeContext";
 
 type Tab = "handle" | "behavior" | "control" | "apps";
-type FavItem = { key: string; name: string; icon: string | null };
+const TAB_ORDER: Tab[] = ["handle", "behavior", "control", "apps"];
 
-const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: "handle", label: "Handle", icon: "options-outline" },
-  { id: "behavior", label: "Behavior", icon: "settings-outline" },
-  { id: "control", label: "Control", icon: "grid-outline" },
-  { id: "apps", label: "Apps", icon: "apps-outline" },
+const TABS: NavItem<Tab>[] = [
+  { id: "handle", label: "Look", icon: "color-palette-outline", activeIcon: "color-palette" },
+  { id: "behavior", label: "Behavior", icon: "settings-outline", activeIcon: "settings" },
+  { id: "control", label: "Controls", icon: "grid-outline", activeIcon: "grid" },
+  { id: "apps", label: "Apps", icon: "apps-outline", activeIcon: "apps" },
 ];
 
 const DEFAULT_PILL: PillSettings = {
-  height: 80, width: 10, position: 0.5, side: "right", opacity: 0.5, theme: "dark", themeChoice: "system", panelColor: "",
+  height: 80, width: 10, position: 0.5, side: "right", opacity: 0.5, theme: "dark", themeChoice: "system",
+  colorSource: "system", seedColor: DEFAULT_SEED, paletteStyle: "tonal",
 };
 
-const PANEL_COLORS: { key: string }[] = [
-  { key: "" },
-  { key: "#1B1B2F" },
-  { key: "#2D1B4E" },
-  { key: "#1A2F2B" },
-  { key: "#2F1F1A" },
-  { key: "#E8DEF8" },
-  { key: "#CDE7F5" },
-  { key: "#CCE8DC" },
-  { key: "#F5E6CC" },
-];
 const DEFAULT_OVERLAY: OverlaySettings = {
   autoHideFullscreen: false, showLabels: true, vibration: true, sensitivity: 16,
   quickControlsEnabled: true, showTorch: true, showAutoRotate: true, showAutoBrightness: true, showRingerMode: true,
@@ -65,119 +54,75 @@ const DEFAULT_OVERLAY: OverlaySettings = {
   showRecentApps: false,
   showKeyboardOnAllApps: false,
   showVolume: true,
-  controlTilesOrder: ['torch','rotate','brightness','ringer','share','power','qr','dnd'],
+  controlTilesOrder: ['torch', 'rotate', 'brightness', 'ringer', 'share', 'power', 'qr', 'dnd'],
   freeformWindows: false,
+  blurBehind: false,
+  blurRadius: 20,
 };
 
-const CONTROL_TILES = [
-  { id: 'torch',      label: 'Torch',            key: 'showTorch',          icon: 'flashlight-outline'    },
-  { id: 'rotate',     label: 'Auto-rotate',      key: 'showAutoRotate',     icon: 'sync-outline'          },
-  { id: 'brightness', label: 'Auto-brightness',  key: 'showAutoBrightness', icon: 'contrast-outline'      },
-  { id: 'ringer',     label: 'Ringer mode',       key: 'showRingerMode',    icon: 'volume-medium-outline' },
-  { id: 'share',      label: 'Quick Share',       key: 'showQuickShare',    icon: 'share-social-outline'  },
-  { id: 'power',      label: 'Power menu',        key: 'showPower',         icon: 'power-outline'         },
-  { id: 'qr',         label: 'QR scanner',        key: 'showQr',            icon: 'qr-code-outline'       },
-  { id: 'dnd',        label: 'Do Not Disturb',    key: 'showDnd',           icon: 'moon-outline'          },
-] as const;
-
-const EXTRA_CONTROLS = [
-  { label: 'Brightness slider', key: 'showBrightnessSlider', icon: 'sunny-outline'  },
-  { label: 'Volume',            key: 'showVolume',           icon: 'options-outline' },
-] as const;
-
-const ALL_CONTROLS = [...CONTROL_TILES, ...EXTRA_CONTROLS];
-
-type TileKey = typeof CONTROL_TILES[number]['key'];
-type AllKey = typeof ALL_CONTROLS[number]['key'];
+/** Shared-axis X: the incoming tab drifts in a little from the direction of travel and fades up. */
+const tabEnter = (dir: number): EntryExitAnimationFunction => () => {
+  "worklet";
+  return {
+    initialValues: { opacity: 0, transform: [{ translateX: dir * 24 }] },
+    animations: {
+      opacity: withTiming(1, { duration: 200 }),
+      transform: [{ translateX: withTiming(0, { duration: 320, easing: emphasizedDecelerate }) }],
+    },
+  };
+};
 
 export default function Index() {
-  const { appTheme, themeChoice, setThemeChoice } = useAppTheme();
+  const {
+    appTheme, colors, themeChoice, setThemeChoice, colorSource, setColorSource,
+    seedColor, setSeedColor, paletteStyle, setPaletteStyle, customSchemes,
+  } = useAppTheme();
+  const insets = useSafeAreaInsets();
+
   const [activeTab, setActiveTab] = useState<Tab>("handle");
   const activeTabRef = useRef<Tab>("handle");
-
-  const slideAnim = useRef(new Animated.Value(0)).current;
+  const dirRef = useRef(1);
 
   const changeTab = useCallback((tab: Tab) => {
-    const tabOrder: Tab[] = ["handle", "behavior", "control", "apps"];
-    const fromIdx = tabOrder.indexOf(activeTabRef.current);
-    const toIdx = tabOrder.indexOf(tab);
-    if (fromIdx === toIdx) return;
-    const fwd = toIdx > fromIdx;
-    Animated.timing(slideAnim, {
-      toValue: fwd ? -60 : 60, duration: 55,
-      easing: Easing.in(Easing.cubic), useNativeDriver: true,
-    }).start(() => {
-      slideAnim.setValue(fwd ? 180 : -180);
-      activeTabRef.current = tab;
-      setActiveTab(tab);
-      Animated.timing(slideAnim, {
-        toValue: 0, duration: 200,
-        easing: Easing.out(Easing.back(1.4)), useNativeDriver: true,
-      }).start();
-    });
-  }, [slideAnim]);
+    const from = TAB_ORDER.indexOf(activeTabRef.current);
+    const to = TAB_ORDER.indexOf(tab);
+    if (from === to) return;
+    dirRef.current = to > from ? 1 : -1;
+    activeTabRef.current = tab;
+    setActiveTab(tab);
+  }, []);
 
-  const swipeResponder = useMemo(() =>
-    PanResponder.create({
-      // Run in bubbling phase so native components (Slider/SeekBar) can claim first.
-      onMoveShouldSetPanResponder: (_evt, gs) =>
-        Math.abs(gs.dx) > 20 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.5,
-      onPanResponderRelease: (_evt, gs) => {
-        if (Math.abs(gs.dx) < 40) return;
-        const tabOrder: Tab[] = ["handle", "behavior", "control", "apps"];
-        const idx = tabOrder.indexOf(activeTabRef.current);
-        if (gs.dx < 0 && idx < tabOrder.length - 1) changeTab(tabOrder[idx + 1]);
-        else if (gs.dx > 0 && idx > 0) changeTab(tabOrder[idx - 1]);
-      },
-    }),
-    [changeTab]
-  );
+  const stepTab = useCallback((delta: number) => {
+    const idx = TAB_ORDER.indexOf(activeTabRef.current) + delta;
+    if (idx >= 0 && idx < TAB_ORDER.length) changeTab(TAB_ORDER[idx]);
+  }, [changeTab]);
 
+  const swipe = useMemo(() => Gesture.Pan()
+    .activeOffsetX([-30, 30])
+    .failOffsetY([-15, 15])
+    .onEnd(e => {
+      if (e.translationX < -60 || e.velocityX < -700) runOnJS(stepTab)(1);
+      else if (e.translationX > 60 || e.velocityX > 700) runOnJS(stepTab)(-1);
+    }), [stepTab]);
+
+  const [loaded, setLoaded] = useState(false);
   const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
   const [serviceEnabled, setServiceEnabled] = useState(false);
   const [dndPerm, setDndPerm] = useState(true);
   const [writePerm, setWritePerm] = useState(true);
   const [usagePerm, setUsagePerm] = useState(true);
+  const [blurSupported, setBlurSupported] = useState(false);
 
   const [pill, setPill] = useState<PillSettings>(DEFAULT_PILL);
   const [overlay, setOverlay] = useState<OverlaySettings>(DEFAULT_OVERLAY);
-  const pillInitRef = useRef(false);
-  const overlayInitRef = useRef(false);
-  const [hexInput, setHexInput] = useState("");
-  const [showHexInput, setShowHexInput] = useState(false);
-  const [gestureMenuOpen, setGestureMenuOpen] = useState<string | null>(null);
-  const [quickControlsExpanded, setQuickControlsExpanded] = useState(false);
-  const expandAnim = useRef(new Animated.Value(0)).current;
-
-  const toggleQuickControls = useCallback(() => {
-    setQuickControlsExpanded(prev => {
-      Animated.timing(expandAnim, {
-        toValue: prev ? 0 : 1,
-        duration: 200,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: false,
-      }).start();
-      return !prev;
-    });
-  }, [expandAnim]);
-
-  const applyHex = useCallback(() => {
-    const hex = hexInput.startsWith("#") ? hexInput : "#" + hexInput;
-    if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
-      setPill(p => ({ ...p, panelColor: hex.toUpperCase() }));
-      setShowHexInput(false);
-    }
-  }, [hexInput]);
 
   const [allApps, setAllApps] = useState<InstalledApp[]>([]);
-  const [listData, setListData] = useState<FavItem[]>([]);
+  const [favorites, setFavorites] = useState<FavItem[]>([]);
+  const [savedFavKeys, setSavedFavKeys] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [appsLoading, setAppsLoading] = useState(false);
   const [appsSaving, setAppsSaving] = useState(false);
-  const appsTabMountedRef = useRef(false);
   const appsLoadedRef = useRef(false);
-  // Holds the saved package list until apps finish loading so we can seed listData.
-  const pendingFavsRef = useRef<string[]>([]);
 
   const appState = useRef<AppStateStatus>(AppState.currentState);
 
@@ -192,24 +137,31 @@ export default function Index() {
       Sidebar.hasWriteSettingsPermission(),
       Sidebar.hasUsageAccessPermission(),
       Sidebar.getFavorites(),
-    ]).then(([perm, svc, pillSettings, overlaySettings, dnd, write, usage, favs]) => {
+      Sidebar.isBlurSupported(),
+      Sidebar.getLaunchTab(),
+    ]).then(([perm, svc, pillSettings, overlaySettings, dnd, write, usage, favs, blur, launchTab]) => {
       setPermissionGranted(perm);
       setServiceEnabled(svc);
-      setPill(pillSettings);
+      setPill({ ...DEFAULT_PILL, ...pillSettings });
       setThemeChoice(pillSettings.themeChoice ?? pillSettings.theme);
-      setOverlay(overlaySettings);
-      if (overlaySettings.quickControlsEnabled) {
-        setQuickControlsExpanded(true);
-        expandAnim.setValue(1);
-      }
+      setColorSource(pillSettings.colorSource ?? "system");
+      setSeedColor(pillSettings.seedColor || DEFAULT_SEED);
+      setPaletteStyle(pillSettings.paletteStyle ?? "tonal");
+      setOverlay({ ...DEFAULT_OVERLAY, ...overlaySettings });
       setDndPerm(dnd);
       setWritePerm(write);
       setUsagePerm(usage);
-      pendingFavsRef.current = favs;
-    });
-  }, []);
+      setBlurSupported(blur);
+      setSavedFavKeys(favs);
+      setFavorites(favs.map(pkg => ({ key: pkg, name: pkg.split(".").pop() ?? pkg, icon: null })));
+      if (launchTab && TAB_ORDER.includes(launchTab as Tab)) {
+        activeTabRef.current = launchTab as Tab;
+        setActiveTab(launchTab as Tab);
+      }
+      setLoaded(true);
+    }).catch(() => setLoaded(true)).finally(() => SplashScreen.hideAsync());
+  }, [setThemeChoice, setColorSource, setSeedColor, setPaletteStyle]);
 
-  // AppState listener — re-registered whenever changeTab changes (it's memoised, so rarely).
   useEffect(() => {
     const sub = AppState.addEventListener("change", (next) => {
       if (appState.current !== "active" && next === "active") {
@@ -218,12 +170,14 @@ export default function Index() {
           Sidebar.hasDndPermission(),
           Sidebar.hasWriteSettingsPermission(),
           Sidebar.hasUsageAccessPermission(),
+          Sidebar.isBlurSupported(),
           Sidebar.getLaunchTab(),
-        ]).then(([perm, dnd, write, usage, launchTab]) => {
+        ]).then(([perm, dnd, write, usage, blur, launchTab]) => {
           setPermissionGranted(perm);
           setDndPerm(dnd);
           setWritePerm(write);
           setUsagePerm(usage);
+          setBlurSupported(blur);
           if (launchTab) changeTab(launchTab as Tab);
         });
       }
@@ -232,36 +186,29 @@ export default function Index() {
     return () => sub.remove();
   }, [changeTab]);
 
+  // Installed apps are loaded the first time the Apps tab opens.
   useEffect(() => {
-    if (activeTab === "apps") appsTabMountedRef.current = true;
-    if (activeTab === "apps" && !appsLoadedRef.current) {
-      appsLoadedRef.current = true;
-      setAppsLoading(true);
-      Sidebar.getInstalledApps()
-        .then(apps => {
-          setAllApps(apps);
-          // Seed the favorites list from saved packages now that we have app data.
-          const map = new Map(apps.map(a => [a.packageName, a]));
-          setListData(
-            pendingFavsRef.current.map(pkg => {
-              const app = map.get(pkg);
-              return { key: pkg, name: app?.name ?? pkg.split(".").pop() ?? pkg, icon: app?.icon ?? null };
-            })
-          );
-        })
-        .catch(() => Alert.alert("Error", "Failed to load installed apps."))
-        .finally(() => setAppsLoading(false));
-    }
+    if (activeTab !== "apps" || appsLoadedRef.current) return;
+    appsLoadedRef.current = true;
+    setAppsLoading(true);
+    Sidebar.getInstalledApps()
+      .then(apps => {
+        setAllApps(apps);
+        const map = new Map(apps.map(a => [a.packageName, a]));
+        setFavorites(prev => prev.map(f => {
+          const app = map.get(f.key);
+          return app ? { key: f.key, name: app.name, icon: app.icon } : f;
+        }));
+      })
+      .catch(() => Alert.alert("Error", "Failed to load installed apps."))
+      .finally(() => setAppsLoading(false));
   }, [activeTab]);
 
   async function toggleService(value: boolean) {
     setServiceEnabled(value);
     try {
-      if (value) {
-        await Sidebar.startService();
-      } else {
-        await Sidebar.stopService();
-      }
+      if (value) await Sidebar.startService();
+      else await Sidebar.stopService();
     } catch {
       setServiceEnabled(!value);
       Alert.alert("Error", `Failed to ${value ? "start" : "stop"} the sidebar service.`);
@@ -269,650 +216,158 @@ export default function Index() {
   }
 
   useEffect(() => {
-    if (!pillInitRef.current) { pillInitRef.current = true; return; }
-    const resolvedTheme = themeChoice === 'system' ? appTheme : pill.theme;
-    const t = setTimeout(() => Sidebar.savePillSettings({ ...pill, theme: resolvedTheme, themeChoice }), 600);
+    if (!loaded) return;
+    const t = setTimeout(() => Sidebar.savePillSettings({
+      ...pill,
+      theme: appTheme,
+      themeChoice,
+      colorSource,
+      seedColor,
+      paletteStyle,
+      customScheme: JSON.stringify(customSchemes),
+    }), 500);
     return () => clearTimeout(t);
-  }, [pill, themeChoice, appTheme]);
+  }, [loaded, pill, themeChoice, appTheme, colorSource, seedColor, paletteStyle, customSchemes]);
 
   useEffect(() => {
-    if (!overlayInitRef.current) { overlayInitRef.current = true; return; }
-    const t = setTimeout(() => Sidebar.saveOverlaySettings(overlay), 600);
+    if (!loaded) return;
+    const t = setTimeout(() => Sidebar.saveOverlaySettings(overlay), 500);
     return () => clearTimeout(t);
-  }, [overlay]);
-
-  const toggleFav = useCallback((app: InstalledApp) => {
-    setListData(prev =>
-      prev.some(i => i.key === app.packageName)
-        ? prev.filter(i => i.key !== app.packageName)
-        : [...prev, { key: app.packageName, name: app.name, icon: app.icon }]
-    );
-  }, []);
+  }, [loaded, overlay]);
 
   async function saveFavs() {
     setAppsSaving(true);
-    try { await Sidebar.saveFavorites(listData.map(i => i.key)); }
-    catch { Alert.alert("Error", "Failed to save favorites."); }
-    finally { setAppsSaving(false); }
+    const keys = favorites.map(i => i.key);
+    try {
+      await Sidebar.saveFavorites(keys);
+      setSavedFavKeys(keys);
+    } catch {
+      Alert.alert("Error", "Failed to save favorites.");
+    } finally {
+      setAppsSaving(false);
+    }
   }
 
-  const filteredApps = useMemo(() => {
-    const q = query.toLowerCase();
-    return q ? allApps.filter(a => a.name.toLowerCase().includes(q)) : allApps;
-  }, [allApps, query]);
+  const favDirty = favorites.length !== savedFavKeys.length || favorites.some((f, i) => f.key !== savedFavKeys[i]);
 
-  const favSet = useMemo(() => new Set(listData.map(i => i.key)), [listData]);
+  const tabBody = () => {
+    switch (activeTab) {
+      case "handle":
+        return <LookTab pill={pill} setPill={setPill} overlay={overlay} setOverlay={setOverlay} blurSupported={blurSupported} />;
+      case "behavior":
+        return <BehaviorTab overlay={overlay} setOverlay={setOverlay} usagePerm={usagePerm} />;
+      case "control":
+        return <ControlTab overlay={overlay} setOverlay={setOverlay}
+          perms={{ overlay: permissionGranted, dnd: dndPerm, write: writePerm, usage: usagePerm }} />;
+      default:
+        return null;
+    }
+  };
 
-  const colors = useMemo(() => makeColors(appTheme), [appTheme]);
-
-  const s = useMemo(() => makeStyles(colors), [colors]);
-
-  const orderedTiles = useMemo(() => {
-    const order = overlay.controlTilesOrder ?? [];
-    const seen = new Set(order);
-    const rest = CONTROL_TILES.filter(t => !seen.has(t.id));
-    return [
-      ...order.map(id => CONTROL_TILES.find(t => t.id === id)).filter((t): t is typeof CONTROL_TILES[number] => !!t),
-      ...rest,
-    ];
-  }, [overlay.controlTilesOrder]);
-
-  const renderFavItem = useCallback(
-    ({ item, drag, isActive }: RenderItemParams<FavItem>) => (
-      <ScaleDecorator>
-        <View style={[s.favRow, isActive && s.favRowActive]}>
-          {item.icon
-            ? <Image source={{ uri: `data:image/png;base64,${item.icon}` }} style={s.favIcon} contentFit="contain" />
-            : <View style={[s.favIcon, s.iconPlaceholder]} />
-          }
-          <Text style={s.favName} numberOfLines={1}>{item.name}</Text>
-          <Pressable onLongPress={drag} delayLongPress={150} style={s.dragHandle} hitSlop={8}>
-            <Ionicons name="reorder-three-outline" size={20} color={colors.subtext} />
-          </Pressable>
-        </View>
-      </ScaleDecorator>
-    ),
-    [s, colors]
-  );
-
-  const renderAppCell = useCallback(
-    ({ item }: { item: InstalledApp }) => {
-      const selected = favSet.has(item.packageName);
-      return (
-        <Pressable style={s.appCell} onPress={() => toggleFav(item)}>
-          <View style={s.appIconWrap}>
-            <Image
-              source={{ uri: `data:image/png;base64,${item.icon}` }}
-              style={s.appIcon}
-              contentFit="contain"
-            />
-            {selected && (
-              <View style={s.checkBadge}>
-                <Ionicons name="checkmark" size={9} color="#fff" />
-              </View>
-            )}
-          </View>
-          <Text style={[s.appCellName, selected && s.appCellNameSelected]} numberOfLines={2}>
-            {item.name}
-          </Text>
-        </Pressable>
-      );
-    },
-    [favSet, s, toggleFav]
-  );
+  // Nothing is drawn until saved settings arrive (the splash stays up), so nothing
+  // animates from defaults to the real values on launch.
+  if (!loaded) return <View style={{ flex: 1, backgroundColor: colors.surfaceContainer }} />;
 
   return (
-    <View style={s.root}>
-      <Stack.Screen options={{ title: "Sidebar" }} />
+    <View style={{ flex: 1, backgroundColor: colors.surfaceContainer, paddingTop: insets.top }}>
+      <ServiceCard
+        enabled={serviceEnabled}
+        disabled={!permissionGranted}
+        side={pill.side}
+        onToggle={toggleService}
+      />
 
       {permissionGranted === false && (
-        <View style={s.banner}>
-          <Text style={s.bannerTitle}>Overlay permission required</Text>
-          <Text style={s.bannerBody}>
-            This app needs {'"'}Display over other apps{'"'} permission to show the sidebar handle.
+        <Animated.View entering={FadeIn} exiting={FadeOut} style={{
+          backgroundColor: colors.errorContainer, borderRadius: 24, padding: 16, gap: 8,
+          marginHorizontal: 16, marginBottom: 12,
+        }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <Ionicons name="warning-outline" size={20} color={colors.onErrorContainer} />
+            <Text style={[type.titleSmall, { color: colors.onErrorContainer }]}>Overlay permission required</Text>
+          </View>
+          <Text style={[type.bodyMedium, { color: colors.onErrorContainer }]}>
+            Allow {'"'}Display over other apps{'"'} so the sidebar handle can appear on screen.
           </Text>
-          <Pressable style={s.bannerBtn} onPress={Sidebar.requestOverlayPermission}>
-            <Text style={s.bannerBtnText}>Grant Permission</Text>
-          </Pressable>
-        </View>
+          <Button label="Grant permission" onPress={Sidebar.requestOverlayPermission} style={{ alignSelf: "flex-start", marginTop: 4 }} />
+        </Animated.View>
       )}
 
-      <View style={s.serviceCard}>
+      <GestureDetector gesture={swipe}>
         <View style={{ flex: 1 }}>
-          <Text style={s.rowLabel}>Sidebar Overlay</Text>
-          <Text style={s.rowSub}>Show pull-tab on screen edge</Text>
-        </View>
-        <Switch
-          value={serviceEnabled}
-          onValueChange={toggleService}
-          disabled={!permissionGranted}
-          trackColor={{ true: colors.tint }}
-        />
-      </View>
-
-      <Animated.View style={{ flex: 1, transform: [{ translateX: slideAnim }] }} {...swipeResponder.panHandlers}>
-
-        {/* Handle tab */}
-        <View style={{ display: activeTab === "handle" ? "flex" : "none", flex: 1 }}>
-          <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent}>
-            <View style={s.section}>
-              <View style={s.settingRow}>
-                <Text style={s.settingLabel}>Side</Text>
-                <View style={s.segmented}>
-                  {(["left", "right", "both"] as const).map(side => (
-                    <Pressable
-                      key={side}
-                      style={[s.segBtn, pill.side === side && s.segBtnActive]}
-                      onPress={() => setPill(p => ({ ...p, side }))}
-                    >
-                      <Text style={[s.segBtnText, pill.side === side && s.segBtnTextActive]}>
-                        {side.charAt(0).toUpperCase() + side.slice(1)}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-              <View style={s.separator} />
-              <View style={s.settingRow}>
-                <Text style={s.settingLabel}>Theme</Text>
-                <View style={s.segmented}>
-                  {(["dark", "light", "system"] as const).map(t => (
-                    <Pressable
-                      key={t}
-                      style={[s.segBtn, themeChoice === t && s.segBtnActive]}
-                      onPress={() => {
-                        setThemeChoice(t);
-                        const resolved = t === 'system' ? appTheme : t;
-                        setPill(p => ({ ...p, theme: resolved, themeChoice: t }));
-                      }}
-                    >
-                      <Text style={[s.segBtnText, themeChoice === t && s.segBtnTextActive]}>
-                        {t === 'system' ? 'System' : t.charAt(0).toUpperCase() + t.slice(1)}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-              <View style={s.separator} />
-              <View style={[s.settingRow, { alignItems: "flex-start", paddingTop: 14, paddingBottom: 14 }]}>
-                <Text style={[s.settingLabel, { paddingTop: 5 }]}>Color</Text>
-                <View style={{ flex: 1 }}>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
-                    {PANEL_COLORS.map(c => {
-                      const sel = pill.panelColor === c.key;
-                      return (
-                        <Pressable key={c.key} onPress={() => { setPill(p => ({ ...p, panelColor: c.key })); setShowHexInput(false); }}>
-                          <View style={{
-                            width: 34, height: 34, borderRadius: 17,
-                            borderWidth: 2.5,
-                            borderColor: sel ? colors.primary : "transparent",
-                            justifyContent: "center", alignItems: "center",
-                          }}>
-                            {c.key === "" ? (
-                              <View style={{ width: 26, height: 26, borderRadius: 13, overflow: "hidden", flexDirection: "row" }}>
-                                <View style={{ flex: 1, backgroundColor: "#1C1B1F" }} />
-                                <View style={{ flex: 1, backgroundColor: "#FFFBFE" }} />
-                              </View>
-                            ) : (
-                              <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: c.key }} />
-                            )}
-                          </View>
-                        </Pressable>
-                      );
-                    })}
-                    {/* Custom swatch */}
-                    {(() => {
-                      const isCustom = pill.panelColor !== "" && !PANEL_COLORS.some(c => c.key === pill.panelColor);
-                      return (
-                        <Pressable onPress={() => { setHexInput(isCustom ? pill.panelColor : ""); setShowHexInput(v => !v); }}>
-                          <View style={{
-                            width: 34, height: 34, borderRadius: 17,
-                            borderWidth: 2.5,
-                            borderColor: isCustom ? colors.primary : "transparent",
-                            justifyContent: "center", alignItems: "center",
-                          }}>
-                            {isCustom ? (
-                              <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: pill.panelColor }} />
-                            ) : (
-                              <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: colors.surfaceContainerHigh, justifyContent: "center", alignItems: "center" }}>
-                                <Ionicons name="pencil-outline" size={13} color={colors.subtext} />
-                              </View>
-                            )}
-                          </View>
-                        </Pressable>
-                      );
-                    })()}
-                  </View>
-                  {showHexInput && (
-                    <View style={{ marginTop: 12 }}>
-                      <ColorPicker
-                        value={/^#[0-9A-Fa-f]{6}$/.test(pill.panelColor) ? pill.panelColor : '#6750A4'}
-                        onChangeJS={({ hex }) => setHexInput(hex.toUpperCase())}
-                        onCompleteJS={({ hex }) => {
-                          const h = hex.toUpperCase();
-                          setPill(p => ({ ...p, panelColor: h }));
-                          setHexInput(h);
-                        }}
-                      >
-                        <HueCircular style={{ alignSelf: "center", height: 220 }} containerStyle={{ backgroundColor: colors.surfaceContainer, justifyContent: "center", alignItems: "center" }}>
-                          <Panel1 style={{ height: 114, width: 114 }} />
-                        </HueCircular>
-                      </ColorPicker>
-                      <View style={{ flexDirection: "row", alignItems: "center", marginTop: 10, gap: 8 }}>
-                        <TextInput
-                          value={hexInput}
-                          onChangeText={setHexInput}
-                          placeholder="#RRGGBB"
-                          placeholderTextColor={colors.subtext}
-                          autoCapitalize="characters"
-                          maxLength={7}
-                          style={[s.search, { flex: 1, marginHorizontal: 0, marginBottom: 0, paddingVertical: 8 }]}
-                          onSubmitEditing={applyHex}
-                        />
-                        <Pressable
-                          style={s.grantBtn}
-                          onPress={applyHex}
-                        >
-                          <Text style={s.grantBtnText}>Apply</Text>
-                        </Pressable>
-                      </View>
-                    </View>
-                  )}
-                </View>
-              </View>
-              <View style={s.separator} />
-              <SliderRow label="Position" min={0} max={1} step={0.01}
-                value={pill.position} display={pill.position.toFixed(2)}
-                leftEdge="Top" rightEdge="Bot"
-                onChange={v => setPill(p => ({ ...p, position: v }))}
-                colors={colors} s={s} />
-              <View style={s.separator} />
-              <SliderRow label="Height" min={40} max={200} step={1}
-                value={pill.height} display={`${Math.round(pill.height)}`}
-                onChange={v => setPill(p => ({ ...p, height: Math.round(v) }))}
-                colors={colors} s={s} />
-              <View style={s.separator} />
-              <SliderRow label="Width" min={2} max={40} step={1}
-                value={pill.width} display={`${Math.round(pill.width)}`}
-                onChange={v => setPill(p => ({ ...p, width: Math.round(v) }))}
-                colors={colors} s={s} />
-              <View style={s.separator} />
-              <SliderRow label="Opacity" min={0} max={1} step={0.05}
-                value={pill.opacity} display={pill.opacity.toFixed(2)}
-                onChange={v => setPill(p => ({ ...p, opacity: parseFloat(v.toFixed(2)) }))}
-                colors={colors} s={s} />
-            </View>
-          </ScrollView>
-        </View>
-
-        {/* Behavior tab */}
-        <View style={{ display: activeTab === "behavior" ? "flex" : "none", flex: 1 }}>
-          <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent}>
-            <View style={s.section}>
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowLabel}>Auto-hide in fullscreen</Text>
-                  <Text style={s.rowSub}>Hide pull-tab when an app is fullscreen</Text>
-                </View>
-                <Switch
-                  value={overlay.autoHideFullscreen}
-                  onValueChange={v => setOverlay(p => ({ ...p, autoHideFullscreen: v }))}
-                  trackColor={{ true: colors.tint }}
+          <Animated.View key={activeTab} entering={tabEnter(dirRef.current)} style={{ flex: 1 }}>
+            <LayoutAnimationConfig skipEntering>
+              {activeTab === "apps" ? (
+                <AppsTab
+                  allApps={allApps}
+                  loading={appsLoading}
+                  favorites={favorites}
+                  setFavorites={setFavorites}
+                  query={query}
+                  setQuery={setQuery}
+                  dirty={favDirty}
+                  saving={appsSaving}
+                  onSave={saveFavs}
                 />
-              </View>
-              <View style={s.separator} />
-              <View style={s.row}>
-                <Text style={[s.rowLabel, { flex: 1 }]}>Show app labels</Text>
-                <Switch
-                  value={overlay.showLabels}
-                  onValueChange={v => setOverlay(p => ({ ...p, showLabels: v }))}
-                  trackColor={{ true: colors.tint }}
-                />
-              </View>
-              <View style={s.separator} />
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowLabel}>Recent apps</Text>
-                  <Text style={s.rowSub}>Show 4 most recently used apps at the top of the panel (requires Usage Access)</Text>
-                </View>
-                <Switch
-                  value={overlay.showRecentApps}
-                  onValueChange={v => {
-                    if (v && !usagePerm) {
-                      Sidebar.requestUsageAccessPermission();
-                      return;
-                    }
-                    setOverlay(p => ({ ...p, showRecentApps: v }));
-                  }}
-                  trackColor={{ true: colors.tint }}
-                />
-              </View>
-              <View style={s.separator} />
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowLabel}>Show keyboard on All Apps</Text>
-                  <Text style={s.rowSub}>Auto-focus the search field and pop up the keyboard when All Apps opens</Text>
-                </View>
-                <Switch
-                  value={overlay.showKeyboardOnAllApps}
-                  onValueChange={v => setOverlay(p => ({ ...p, showKeyboardOnAllApps: v }))}
-                  trackColor={{ true: colors.tint }}
-                />
-              </View>
-              <View style={s.separator} />
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowLabel}>Open apps in freeform windows</Text>
-                  <Text style={s.rowSub}>Launch apps as floating windows via Shizuku</Text>
-                </View>
-                <Switch
-                  value={overlay.freeformWindows}
-                  onValueChange={async v => {
-                    if (v) {
-                      const status = await Sidebar.hasShizukuPermission();
-                      if (status !== 'granted') await Sidebar.requestShizukuPermission();
-                    }
-                    setOverlay(p => ({ ...p, freeformWindows: v }));
-                  }}
-                  trackColor={{ true: colors.tint }}
-                />
-              </View>
-              <View style={s.separator} />
-              <View style={s.row}>
-                <Text style={[s.rowLabel, { flex: 1 }]}>Vibration feedback</Text>
-                <Switch
-                  value={overlay.vibration}
-                  onValueChange={v => setOverlay(p => ({ ...p, vibration: v }))}
-                  trackColor={{ true: colors.tint }}
-                />
-              </View>
-              <View style={s.separator} />
-              <SliderRow label="Sensitivity" min={8} max={48} step={1}
-                value={overlay.sensitivity} display={`${overlay.sensitivity}`}
-                leftEdge="High" rightEdge="Low"
-                onChange={v => setOverlay(p => ({ ...p, sensitivity: Math.round(v) }))}
-                colors={colors} s={s} />
-              <View style={s.separator} />
-              <View style={s.row}>
-                <Text style={[s.rowLabel, { flex: 1 }]}>Pill gestures</Text>
-                <Switch
-                  value={overlay.gesturesEnabled}
-                  onValueChange={v => setOverlay(p => ({ ...p, gesturesEnabled: v }))}
-                  trackColor={{ true: colors.tint }}
-                />
-              </View>
-              {overlay.gesturesEnabled && (
-                ([
-                  { key: 'gestureSwipeIn',   label: 'Swipe in'   },
-                  { key: 'gestureSwipeUp',   label: 'Swipe up'   },
-                  { key: 'gestureSwipeDown', label: 'Swipe down' },
-                  { key: 'gestureDoubleTap', label: 'Double tap' },
-                ] as const).map(({ key, label }, i, arr) => {
-                  const ACTIONS = [
-                    { value: 'none',          label: 'Off'           },
-                    { value: 'panel',         label: 'Panel'         },
-                    { value: 'notifications', label: 'Notifications' },
-                    { value: 'quick_settings',label: 'Quick Settings'},
-                    { value: 'all_apps',      label: 'All Apps'      },
-                  ] as const;
-                  const current = ACTIONS.find(a => a.value === overlay[key])?.label ?? 'Off';
-                  const isOpen = gestureMenuOpen === key;
-                  return (
-                    <View key={key}>
-                      <View style={s.separator} />
-                      <Pressable style={s.row} onPress={() => setGestureMenuOpen(isOpen ? null : key)}>
-                        <Text style={[s.rowLabel, { flex: 1, paddingStart: 16 }]}>{label}</Text>
-                        <Text style={[s.rowSub, { marginRight: 6 }]}>{current}</Text>
-                        <Ionicons
-                          name={isOpen ? 'chevron-up' : 'chevron-down'}
-                          size={16} color={colors.subtext}
-                        />
-                      </Pressable>
-                      {isOpen && (
-                        <View style={{
-                          marginHorizontal: 16, marginBottom: 8,
-                          backgroundColor: colors.surfaceContainerHigh,
-                          borderRadius: 12, overflow: 'hidden',
-                        }}>
-                          {ACTIONS.map((a, ai) => (
-                            <View key={a.value}>
-                              {ai > 0 && <View style={[s.separator, { marginLeft: 0 }]} />}
-                              <Pressable
-                                style={[s.row, overlay[key] === a.value && { backgroundColor: colors.secondaryContainer }]}
-                                onPress={() => { setOverlay(p => ({ ...p, [key]: a.value })); setGestureMenuOpen(null); }}
-                              >
-                                <Text style={[s.rowLabel, { flex: 1 }]}>{a.label}</Text>
-                                {overlay[key] === a.value && (
-                                  <Ionicons name="checkmark" size={18} color={colors.primary} />
-                                )}
-                              </Pressable>
-                            </View>
-                          ))}
-                        </View>
-                      )}
-                    </View>
-                  );
-                })
-              )}
-            </View>
-          </ScrollView>
-        </View>
-
-        {/* Control tab */}
-        <View style={{ display: activeTab === "control" ? "flex" : "none", flex: 1 }}>
-          <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent}>
-            <View style={s.section}>
-              <Text style={s.sectionTitle}>Quick Controls</Text>
-              {/* Quick controls header — enable toggle + expand/collapse */}
-              <Pressable style={s.row} onPress={toggleQuickControls}>
-                <Text style={[s.rowLabel, { flex: 1 }]}>Enable Quick Controls</Text>
-                <View onStartShouldSetResponder={() => true}>
-                  <Switch
-                    value={overlay.quickControlsEnabled}
-                    onValueChange={v => setOverlay(p => ({ ...p, quickControlsEnabled: v }))}
-                    trackColor={{ true: colors.tint }}
-                  />
-                </View>
-                <Animated.View style={{
-                  marginLeft: 8,
-                  transform: [{ rotate: expandAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] }) }],
-                }}>
-                  <Ionicons name="chevron-down" size={18} color={colors.subtext} />
-                </Animated.View>
-              </Pressable>
-              {/* Animated accordion body */}
-              <Animated.View style={{ overflow: 'hidden', maxHeight: expandAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 2000] }) }}>
-                <View style={s.separator} />
-                <Text style={s.sectionTitle}>Active Controls</Text>
-                <DraggableFlatList
-                  horizontal
-                  data={orderedTiles.filter(t => overlay[t.key as TileKey])}
-                  keyExtractor={item => item.id}
-                  scrollEnabled
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={s.controlStrip}
-                  renderItem={({ item, drag, isActive }: RenderItemParams<typeof CONTROL_TILES[number]>) => (
-                    <ScaleDecorator>
-                      <Pressable onLongPress={drag} delayLongPress={150} style={[s.controlCell, isActive && s.controlCellActive]}>
-                        <View style={s.controlIconCircle}>
-                          <Ionicons name={item.icon as any} size={22} color={colors.onPrimaryContainer} />
-                        </View>
-                        <Text style={s.controlCellLabel} numberOfLines={1}>{item.label}</Text>
-                      </Pressable>
-                    </ScaleDecorator>
-                  )}
-                  onDragEnd={({ data }) => {
-                    const disabledIds = orderedTiles.filter(t => !overlay[t.key as TileKey]).map(t => t.id);
-                    setOverlay(p => ({ ...p, controlTilesOrder: [...data.map(t => t.id), ...disabledIds] }));
-                  }}
-                />
-                <View style={s.separator} />
-                <Text style={s.sectionTitle}>All Controls</Text>
-                <View style={s.controlGrid}>
-                  {ALL_CONTROLS.map(item => {
-                    const enabled = !!overlay[item.key as AllKey];
-                    return (
-                      <Pressable
-                        key={item.key}
-                        style={s.controlGridCell}
-                        onPress={() => setOverlay(p => ({ ...p, [item.key]: !enabled }))}
-                      >
-                        <View style={[s.controlIconCircle, !enabled && s.controlIconCircleOff]}>
-                          <Ionicons name={item.icon as any} size={22} color={enabled ? colors.onPrimaryContainer : colors.subtext} />
-                          {enabled && (
-                            <View style={s.checkBadge}>
-                              <Ionicons name="checkmark" size={9} color="#fff" />
-                            </View>
-                          )}
-                        </View>
-                        <Text style={s.controlCellLabel} numberOfLines={1}>{item.label}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </Animated.View>
-            </View>
-            {(() => {
-              const granted = [permissionGranted, dndPerm, writePerm, usagePerm].filter(Boolean).length;
-              return (
-                <Text style={s.permCount}>{granted} / 4 permissions granted</Text>
-              );
-            })()}
-            <View style={s.section}>
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowLabel}>Display over other apps</Text>
-                  <Text style={s.rowSub}>{permissionGranted ? "Permission granted" : "Required to show the sidebar handle"}</Text>
-                </View>
-                {permissionGranted
-                  ? <Ionicons name="checkmark-circle" size={20} color={colors.primary} />
-                  : <Pressable style={s.grantBtn} onPress={Sidebar.requestOverlayPermission}>
-                    <Text style={s.grantBtnText}>Grant</Text>
-                  </Pressable>
-                }
-              </View>
-              <View style={s.separator} />
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowLabel}>Do Not Disturb</Text>
-                  <Text style={s.rowSub}>{dndPerm ? "Permission granted" : "Required for DND control tile"}</Text>
-                </View>
-                {dndPerm
-                  ? <Ionicons name="checkmark-circle" size={20} color={colors.primary} />
-                  : <Pressable style={s.grantBtn} onPress={Sidebar.requestDndPermission}>
-                    <Text style={s.grantBtnText}>Grant</Text>
-                  </Pressable>
-                }
-              </View>
-              <View style={s.separator} />
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowLabel}>Auto-rotate & Brightness</Text>
-                  <Text style={s.rowSub}>{writePerm ? "Permission granted" : "Required to modify system settings"}</Text>
-                </View>
-                {writePerm
-                  ? <Ionicons name="checkmark-circle" size={20} color={colors.primary} />
-                  : <Pressable style={s.grantBtn} onPress={Sidebar.requestWriteSettingsPermission}>
-                    <Text style={s.grantBtnText}>Grant</Text>
-                  </Pressable>
-                }
-              </View>
-              <View style={s.separator} />
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowLabel}>Usage Access</Text>
-                  <Text style={s.rowSub}>{usagePerm ? "Permission granted" : "Required for Recent apps"}</Text>
-                </View>
-                {usagePerm
-                  ? <Ionicons name="checkmark-circle" size={20} color={colors.primary} />
-                  : <Pressable style={s.grantBtn} onPress={Sidebar.requestUsageAccessPermission}>
-                    <Text style={s.grantBtnText}>Grant</Text>
-                  </Pressable>
-                }
-              </View>
-            </View>
-            <Pressable style={[s.saveBtn, s.openSettingsBtn]} onPress={() => Linking.openSettings()}>
-              <Ionicons name="settings-outline" size={16} color={colors.onPrimary} style={{ marginRight: 8 }} />
-              <Text style={s.saveBtnText}>Open App Settings</Text>
-            </Pressable>
-          </ScrollView>
-        </View>
-
-        {/* Apps tab — lazy-mounted so DraggableFlatList first renders while visible */}
-        {appsTabMountedRef.current && <View style={{ display: activeTab === "apps" ? "flex" : "none", flex: 1 }}>
-          <View style={s.appsPane}>
-            {/* Left: all apps grid */}
-            <View style={s.appsLeft}>
-              <TextInput
-                style={s.search}
-                placeholder="Search apps…"
-                placeholderTextColor={colors.subtext}
-                value={query}
-                onChangeText={setQuery}
-                clearButtonMode="while-editing"
-              />
-              {appsLoading ? (
-                <ActivityIndicator style={{ marginTop: 32 }} color={colors.tint} />
               ) : (
-                <FlatList
-                  data={filteredApps}
-                  keyExtractor={item => item.packageName}
-                  renderItem={renderAppCell}
-                  numColumns={3}
-                  extraData={favSet}
-                  contentContainerStyle={s.appGrid}
-                  showsVerticalScrollIndicator={false}
-                />
+                <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 4, paddingBottom: 24 }}>
+                  {tabBody()}
+                </ScrollView>
               )}
-            </View>
+            </LayoutAnimationConfig>
+          </Animated.View>
+        </View>
+      </GestureDetector>
 
-            <View style={s.paneDiv} />
-
-            {/* Right: favorites */}
-            <View style={s.appsRight}>
-              <Text style={s.favHeader}>Favorites</Text>
-              <DraggableFlatList
-                data={listData}
-                keyExtractor={item => item.key}
-                renderItem={renderFavItem}
-                onDragEnd={({ data }) => setListData(data)}
-                containerStyle={{ flex: 1 }}
-                showsVerticalScrollIndicator={false}
-                ListEmptyComponent={
-                  <Text style={s.favEmpty}>Tap apps on the left to add.</Text>
-                }
-              />
-              <Pressable
-                style={[s.saveBtn, s.saveBtnCompact, appsSaving && s.saveBtnDisabled]}
-                onPress={saveFavs}
-                disabled={appsSaving}
-              >
-                <Text style={s.saveBtnText}>{appsSaving ? "Saving…" : "Save"}</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>}
-
-      </Animated.View>
-
-      {/* M3 Navigation Bar */}
-      <View style={s.tabBar}>
-        {TABS.map(tab => (
-          <Pressable key={tab.id} style={s.tabItem} onPress={() => changeTab(tab.id)}>
-            <View style={[s.navIndicator, activeTab === tab.id && s.navIndicatorActive]}>
-              <Ionicons
-                name={tab.icon as any}
-                size={22}
-                color={activeTab === tab.id ? colors.onPrimaryContainer : colors.subtext}
-              />
-              <Text style={[s.tabLabel, activeTab === tab.id && s.tabLabelActive]}>
-                {tab.label}
-              </Text>
-            </View>
-          </Pressable>
-        ))}
-      </View>
+      <NavBar items={TABS} active={activeTab} onChange={changeTab} />
     </View>
   );
 }
 
+/** Hero card for the overlay service: the whole card is the toggle and morphs color/shape with state. */
+function ServiceCard({ enabled, disabled, side, onToggle }: {
+  enabled: boolean; disabled: boolean; side: PillSettings["side"]; onToggle: (v: boolean) => void;
+}) {
+  const { colors } = useAppTheme();
+  const p = useSharedValue(enabled ? 1 : 0);
+  useEffect(() => { p.value = withSpring(enabled ? 1 : 0, Springs.spatial); }, [enabled, p]);
+
+  const card = useAnimatedStyle(() => ({
+    backgroundColor: interpolateColor(p.value, [0, 1], [colors.surfaceBright, colors.primaryContainer]),
+  }));
+  const badge = useAnimatedStyle(() => ({
+    borderRadius: 16 + 10 * p.value,
+    backgroundColor: interpolateColor(p.value, [0, 1], [colors.surfaceContainerHighest, colors.primary]),
+  }));
+
+  const fg = enabled ? colors.onPrimaryContainer : colors.onSurface;
+  const sideText = side === "both" ? "both edges" : `the ${side} edge`;
+
+  return (
+    <MorphPressable
+      radius={28}
+      pressedRadius={20}
+      scale={0.98}
+      disabled={disabled}
+      onPress={() => onToggle(!enabled)}
+      ripple={false}
+      style={{ marginHorizontal: 16, marginTop: 12, marginBottom: 12 }}
+    >
+      <Animated.View style={[{
+        flexDirection: "row", alignItems: "center", gap: 16, paddingHorizontal: 16, paddingVertical: 16,
+        opacity: disabled ? 0.6 : 1,
+      }, card]}>
+        <Animated.View style={[{ width: 52, height: 52, alignItems: "center", justifyContent: "center" }, badge]}>
+          <Ionicons name="albums" size={24} color={enabled ? colors.onPrimary : colors.onSurfaceVariant} />
+        </Animated.View>
+        <View style={{ flex: 1 }}>
+          <Text style={[type.titleLarge, { color: fg }]}>Sidebar</Text>
+          <Text style={[type.bodyMedium, { color: enabled ? colors.onPrimaryContainer : colors.onSurfaceVariant }]}>
+            {enabled ? `Active on ${sideText}` : "Off — tap to show the pull-tab"}
+          </Text>
+        </View>
+        <M3Switch value={enabled} onValueChange={onToggle} disabled={disabled} />
+      </Animated.View>
+    </MorphPressable>
+  );
+}

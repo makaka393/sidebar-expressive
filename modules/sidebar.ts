@@ -1,4 +1,5 @@
 import { NativeModules } from 'react-native';
+import type { ColorSource, PaletteStyle, SchemePair } from '../src/theme';
 
 const { SidebarModule } = NativeModules;
 
@@ -23,8 +24,13 @@ export interface PillSettings {
   opacity: number;
   theme: 'light' | 'dark';
   themeChoice: 'light' | 'dark' | 'system';
-  panelColor: string;
+  colorSource: ColorSource;
+  seedColor: string;
+  paletteStyle: PaletteStyle;
 }
+
+/** Pill settings plus the generated custom scheme (JSON of `SchemePair`) the overlay paints with. */
+export type PillSettingsPayload = PillSettings & { customScheme: string };
 
 export interface OverlaySettings {
   autoHideFullscreen: boolean;
@@ -53,6 +59,10 @@ export interface OverlaySettings {
   showVolume: boolean;
   controlTilesOrder: string[];
   freeformWindows: boolean;
+  /** Blur apps behind the open panel / All Apps drawer (Android 12+ cross-window blur). */
+  blurBehind: boolean;
+  /** Blur radius in dp. */
+  blurRadius: number;
 }
 
 export default {
@@ -80,7 +90,7 @@ export default {
   isServiceEnabled(): Promise<boolean> {
     return SidebarModule.isServiceEnabled();
   },
-  savePillSettings(settings: PillSettings): Promise<void> {
+  savePillSettings(settings: PillSettingsPayload): Promise<void> {
     return SidebarModule.savePillSettings(settings);
   },
   getPillSettings(): Promise<PillSettings> {
@@ -100,6 +110,17 @@ export default {
       controlTilesOrder: JSON.stringify(settings.controlTilesOrder),
     };
     return SidebarModule.saveOverlaySettings(payload);
+  },
+  /** Wallpaper-derived M3 schemes (Android 12+), or null when dynamic color is unavailable. */
+  getSystemColors(): Promise<SchemePair | null> {
+    return SidebarModule.getSystemColors();
+  },
+  /** Dominant wallpaper colors (`#RRGGBB`, up to 3) for theme suggestions; empty if unavailable. */
+  getWallpaperColors(): Promise<string[]> {
+    return SidebarModule.getWallpaperColors();
+  },
+  isBlurSupported(): Promise<boolean> {
+    return SidebarModule.isBlurSupported();
   },
   getLaunchTab(): Promise<string | null> {
     return SidebarModule.getLaunchTab();
