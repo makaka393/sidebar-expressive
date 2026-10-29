@@ -30,9 +30,13 @@ An Android overlay sidebar for quick access to favorite apps. A pull-tab handle 
 
 ## Gallery
 
-![Sidebar Layout](assets/images/photo_2026-10-29_12-38-41.jpg)
-![Overlay Menu](assets/images/photo_2026-10-29_12-39-37.jpg)
-![App Drawer](assets/images/photo_2026-10-29_12-39-50.jpg)
+<table>
+  <tr>
+    <td><img src="assets/images/photo_2026-10-29_12-38-41.jpg" alt="Sidebar Layout" width="250"></td>
+    <td><img src="assets/images/photo_2026-10-29_12-39-37.jpg" alt="Overlay Menu" width="250"></td>
+    <td><img src="assets/images/photo_2026-10-29_12-39-50.jpg" alt="App Drawer" width="250"></td>
+  </tr>
+</table>
 
 ## Installation
 
